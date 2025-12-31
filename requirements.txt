@@ -1,0 +1,6 @@
+python-docx==1.1.2
+chromadb==0.5.5
+openai==1.57.0
+python-dotenv==1.0.1
+tiktoken==0.8.0
+posthog==3.6.3
