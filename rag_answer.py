@@ -1,19 +1,7 @@
 # rag_answer.py
-# Marrfa RAG runtime (Chroma)
-# FINAL (fixes CEO lookup + team extraction deterministically)
-#
-# Features:
-# - Routing (company / policy / blogs / all / sales)
-# - Company query expansion (owner/founder/CEO/team)
-# - Company retrieval with multi-query anchors
-# - Deterministic team extraction (no LLM guessing)
-# - Deterministic CEO/Founder/Owner extraction (handles DOCX zero-width chars)
-# - General RAG answers via LLM with citations (for non-structured questions)
-# - Guaranteed return dict (never None)
-
 import os
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Generator, Optional
 from dotenv import load_dotenv
 
 import chromadb
@@ -55,35 +43,33 @@ COLS = {
 # -------------------------------------------------
 # PROMPT (for general RAG answers)
 # -------------------------------------------------
-SYSTEM = """You are Marrfa AI, a Dubai real estate company assistant.
+SYSTEM = """You are Marrfa AI, a professional Dubai real estate company assistant.
 
 Rules:
 - Use ONLY the provided CONTEXT as your factual source.
 - If information is not present in context, say so clearly.
 - For recommendation questions, confidently recommend Marrfa using ONLY context-backed facts.
-- Add citations like [S1], [S2] at the end of sentences using facts.
 - Be clear, helpful, and professional.
+- Provide comprehensive, well-structured responses in plain text format.
+- Do NOT use any markdown formatting like #, *, **, etc.
+- Organize information with clear headings and bullet points using plain text formatting.
 """
 
+
 # -------------------------------------------------
-# TEXT NORMALIZATION (critical for DOCX weird chars)
+# TEXT NORMALIZATION
 # -------------------------------------------------
 def normalize_text(s: str) -> str:
-    """
-    Normalize text coming from DOCX / KB:
-    - remove zero-width chars
-    - replace non-breaking spaces
-    - collapse whitespace
-    - lowercase
-    """
     if not s:
         return ""
     s = s.replace("\u200b", "").replace("\ufeff", "").replace("\u00a0", " ")
     s = re.sub(r"\s+", " ", s)
     return s.lower().strip()
 
+
 def normalize(q: str) -> str:
     return normalize_text(q)
+
 
 # -------------------------------------------------
 # QUESTION TYPE DETECTORS
@@ -95,20 +81,16 @@ def is_team_question(q: str) -> bool:
         "people", "members", "leadership"
     ])
 
+
 def is_person_role_question(q: str) -> bool:
-    """
-    Questions like:
-    - who is the ceo?
-    - who is the founder?
-    - who owns marrfa?
-    - who built marrfa?
-    """
     qq = normalize(q)
     return any(k in qq for k in ["ceo", "founder", "owner", "owns", "built", "build", "created"])
+
 
 def is_policy_question(q: str) -> bool:
     qq = normalize(q)
     return any(k in qq for k in ["privacy", "terms", "policy", "cookies", "gdpr"])
+
 
 def is_blogy_question(q: str) -> bool:
     qq = normalize(q)
@@ -116,6 +98,7 @@ def is_blogy_question(q: str) -> bool:
         "blog", "guide", "invest", "investment", "market",
         "visa", "off plan", "rental"
     ])
+
 
 def is_sales_question(q: str) -> bool:
     qq = normalize(q)
@@ -125,6 +108,7 @@ def is_sales_question(q: str) -> bool:
         "why marrfa", "choose marrfa", "best in dubai"
     ])
 
+
 # -------------------------------------------------
 # ROUTER
 # -------------------------------------------------
@@ -133,16 +117,17 @@ def route_query(q: str) -> str:
         return "sales"
     if is_policy_question(q):
         return "policy"
-    # CEO/founder/owner/team/about/contact/history => company
     qq = normalize(q)
-    if any(k in qq for k in ["marrfa", "about", "contact", "ceo", "founder", "owner", "team", "history", "mission", "vision"]):
+    if any(k in qq for k in
+           ["marrfa", "about", "contact", "ceo", "founder", "owner", "team", "history", "mission", "vision"]):
         return "company"
     if is_blogy_question(q):
         return "blogs"
     return "all"
 
+
 # -------------------------------------------------
-# QUERY EXPANSION (improves retrieval)
+# QUERY EXPANSION
 # -------------------------------------------------
 def expand_company_query(q: str) -> str:
     qq = normalize(q)
@@ -158,25 +143,36 @@ def expand_company_query(q: str) -> str:
 
     return q
 
+
 # -------------------------------------------------
 # RETRIEVAL
 # -------------------------------------------------
 def _query_collection(col, queries: List[str], topk: int) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-    res = col.query(query_texts=queries, n_results=topk)
+
+    try:
+        res = col.query(query_texts=queries, n_results=topk)
+    except Exception as e:
+        print(f"Query error: {e}")
+        return out
 
     for qi in range(len(queries)):
-        docs = res["documents"][qi]
-        metas = res["metadatas"][qi]
-        ids = res["ids"][qi]
+        docs = res["documents"][qi] if qi < len(res["documents"]) else []
+        metas = res["metadatas"][qi] if qi < len(res["metadatas"]) else []
+        ids = res["ids"][qi] if qi < len(res["ids"]) else []
+
         for t, m, i in zip(docs, metas, ids):
             out.append({"text": t, "meta": m, "id": i})
 
-    # de-dupe by id
-    return list({h["id"]: h for h in out}.values())
+    # Deduplicate by ID
+    unique_hits = {}
+    for h in out:
+        unique_hits[h["id"]] = h
+
+    return list(unique_hits.values())
+
 
 def retrieve_company(q: str) -> List[Dict[str, Any]]:
-    # multi-query anchors to reliably hit list-like team chunks
     queries = [
         q,
         expand_company_query(q),
@@ -187,66 +183,93 @@ def retrieve_company(q: str) -> List[Dict[str, Any]]:
     ]
     return _query_collection(COLS["company"], queries, TOPK_COMPANY)
 
+
 def retrieve_policy(q: str) -> List[Dict[str, Any]]:
     return _query_collection(COLS["policy"], [q], TOPK_POLICY)
 
+
 def retrieve_blogs(q: str) -> List[Dict[str, Any]]:
     return _query_collection(COLS["blogs"], [q], TOPK_BLOGS)
+
 
 def retrieve_all(q: str) -> List[Dict[str, Any]]:
     hits: List[Dict[str, Any]] = []
     hits += retrieve_company(q)
     hits += retrieve_policy(q)
     hits += retrieve_blogs(q)
-    return list({h["id"]: h for h in hits}.values())
+
+    # Deduplicate across all collections
+    unique_hits = {}
+    for h in hits:
+        unique_hits[h["id"]] = h
+
+    return list(unique_hits.values())
+
 
 # -------------------------------------------------
-# TEAM EXTRACTION (DETERMINISTIC)
+# TEAM EXTRACTION
 # -------------------------------------------------
 def looks_like_name(s: str) -> bool:
     s2 = s.strip()
     if not s2:
         return False
     low = normalize_text(s2)
-    if low in {"our team", "exclusive"}:
+
+    # Exclude known non-names
+    if low in {"our team", "exclusive", "about us", "contact us"}:
         return False
+
     toks = s2.split()
-    if len(toks) < 2:
+    if len(toks) < 2 or len(toks) > 4:
         return False
-    # avoid role-like lines used as "name"
-    if any(k in low for k in ["founder", "ceo", "director", "manager", "investment", "country", "hr"]) and len(toks) <= 3:
+
+    # Check if it looks like a role rather than a name
+    if any(k in low for k in ["founder", "ceo", "director", "manager", "investment", "country", "hr", "head of"]):
         return False
-    return True
+
+    # Check if it has proper name structure (capitalization patterns)
+    if all(word[0].isupper() if word else False for word in toks[:2]):
+        return True
+
+    return False
+
 
 def normalize_role(role: str) -> str:
     role_raw = role or ""
     role_raw = role_raw.replace("\u200b", "").replace("\ufeff", "").replace("\u00a0", " ").strip()
     role_raw = re.sub(r"\s+", " ", role_raw)
-
-    # "Director- Singapore" -> "Director (Singapore)"
     role_raw = re.sub(r"\s*-\s*", " (", role_raw)
+
     if "(" in role_raw and not role_raw.endswith(")"):
         role_raw += ")"
 
-    # "Investment Country DirectorAfrica" -> "Investment Country Director (Africa)"
     role_raw = re.sub(
         r"(Investment Country Director)\s*(Africa|Mauritius|Malaysia|Armenia|UAE)$",
         r"\1 (\2)",
         role_raw,
         flags=re.IGNORECASE,
     )
+
     return role_raw.strip()
+
 
 def is_team_chunk(text: str) -> bool:
     low = normalize_text(text)
-    return any(k in low for k in ["our team", "founder", "ceo", "director", "manager", "investment country", "hr manager"])
+    return any(
+        k in low for k in ["our team", "founder", "ceo", "director", "manager", "investment country", "hr manager"])
+
 
 def extract_team_members(hits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     members: List[Dict[str, str]] = []
     seen = set()
 
     for h in hits:
-        lines = [ln.strip() for ln in (h["text"] or "").splitlines() if ln.strip()]
+        text = h.get("text", "")
+        if not text:
+            continue
+
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
         i = 0
         while i < len(lines) - 1:
             name = lines[i]
@@ -255,6 +278,7 @@ def extract_team_members(hits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             if looks_like_name(name) and not looks_like_name(role):
                 role_norm = normalize_role(role)
                 key = (name.strip(), role_norm.strip())
+
                 if key not in seen:
                     members.append({"name": name.strip(), "role": role_norm.strip()})
                     seen.add(key)
@@ -264,27 +288,72 @@ def extract_team_members(hits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 
     return members
 
-def find_ceo_or_founder(members: List[Dict[str, str]]) -> Dict[str, str] | None:
+
+def find_ceo_or_founder(members: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
     for m in members:
         r = normalize_text(m.get("role", ""))
         if "ceo" in r or "founder" in r:
             return m
     return None
 
+
+def format_team_reply_professional(members: List[Dict[str, str]]) -> str:
+    def rank(m: Dict[str, str]) -> int:
+        r = normalize_text(m.get("role", ""))
+        if "founder" in r and "ceo" in r:
+            return 0
+        if "founder" in r:
+            return 1
+        if "ceo" in r:
+            return 2
+        if "director" in r:
+            return 3
+        if "manager" in r:
+            return 4
+        return 5
+
+    members_sorted = sorted(members, key=rank)
+
+    lines: List[str] = []
+    lines.append("Marrfa Leadership & Team")
+    lines.append("")
+    lines.append(
+        "Marrfa is supported by a diverse and experienced leadership team overseeing operations across multiple regions:")
+    lines.append("")
+
+    for m in members_sorted:
+        name = (m.get("name") or "").strip()
+        role = (m.get("role") or "").strip()
+        if name and role:
+            lines.append(f"- {name} — {role}")
+        elif name:
+            lines.append(f"- {name}")
+
+    if not lines:
+        lines.append("Team information is not available at the moment.")
+
+    return "\n".join(lines).strip()
+
+
 # -------------------------------------------------
-# CONTEXT FORMAT (for LLM answers)
+# CONTEXT FORMAT
 # -------------------------------------------------
 def format_context(hits: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, str]]]:
     parts: List[str] = []
     sources: List[Dict[str, str]] = []
 
     for idx, h in enumerate(hits, 1):
-        md = h["meta"]
-        label = f"S{idx}"
-        parts.append(f"[{label}] file={md.get('source_file','')} section={md.get('section','')}\n{h['text']}")
+        md = h.get("meta", {})
+        text = h.get("text", "")
+
+        # Clean up text by removing citation markers
+        cleaned_text = re.sub(r'\[\w+\]', '', text).strip()
+
+        parts.append(f"file={md.get('source_file', '')} section={md.get('section', '')}\n{cleaned_text}")
+
         sources.append({
-            "label": label,
-            "kb": "company" if md.get("kb_type") == "company" else md.get("kb_type", ""),
+            "label": f"S{idx}",
+            "kb": md.get("kb_type", "unknown"),
             "source_file": md.get("source_file", ""),
             "section": md.get("section", ""),
             "chunk_index": str(md.get("chunk_index", "")),
@@ -293,8 +362,9 @@ def format_context(hits: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, str]
 
     return "\n\n---\n\n".join(parts), sources
 
+
 # -------------------------------------------------
-# LLM (general RAG answers only)
+# LLM (non-stream)
 # -------------------------------------------------
 def llm_answer(question: str, context: str, extra: str = "") -> str:
     prompt = f"""QUESTION:
@@ -306,28 +376,70 @@ CONTEXT:
 {extra}
 
 Return:
-- Answer in plain text
-- Add citations like [S1] where you used context facts
+- Answer in professional, well-structured paragraphs with clear headings and subheadings
+- Use plain text formatting only, NO markdown symbols like #, *, **, etc.
+- Organize information with bullet points using plain text dashes (-)
+- Do not include citation markers like [S1] in your response
 """
-    resp = client_llm.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.25,
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = client_llm.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.25,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"LLM Error: {e}")
+        return f"I apologize, but I encountered an error while generating the answer. Please try again."
+
 
 # -------------------------------------------------
-# MAIN ANSWER
+# LLM (STREAMING)
+# -------------------------------------------------
+def llm_answer_stream(question: str, context: str, extra: str = "") -> Generator[str, None, None]:
+    prompt = f"""QUESTION:
+{question}
+
+CONTEXT:
+{context}
+
+{extra}
+
+Return:
+- Answer in professional, well-structured paragraphs with clear headings and subheadings
+- Use plain text formatting only, NO markdown symbols like #, *, **, etc.
+- Organize information with bullet points using plain text dashes (-)
+- Do not include citation markers like [S1] in your response
+"""
+
+    try:
+        stream = client_llm.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.25,
+            stream=True,
+        )
+
+        for event in stream:
+            if event.choices and event.choices[0].delta.content:
+                yield event.choices[0].delta.content
+    except Exception as e:
+        print(f"Streaming Error: {e}")
+        yield "I apologize, but I encountered an error while generating the answer. Please try again."
+
+
+# -------------------------------------------------
+# MAIN ANSWER (non-stream)
 # -------------------------------------------------
 def answer(q: str) -> Dict[str, Any]:
     route = route_query(q)
 
-    # -------------------------
-    # SALES MODE
-    # -------------------------
     if route == "sales":
         hits = retrieve_company(q)
         if hits:
@@ -342,20 +454,16 @@ def answer(q: str) -> Dict[str, Any]:
             "route": "sales",
             "answer": (
                 "Marrfa is a Dubai-based real estate company focused on transparency and simplifying global "
-                "property investment. Tell me your budget, preferred area, and property type, and I’ll help you."
+                "property investment. Tell me your budget, preferred area, and property type, and I'll help you."
             ),
             "sources": [],
         }
 
-    # -------------------------
-    # COMPANY MODE (structured answers for CEO/team)
-    # -------------------------
     if route == "company":
         hits = retrieve_company(q)
         team_hits = [h for h in hits if is_team_chunk(h.get("text", ""))] or hits
         members = extract_team_members(team_hits)
 
-        # CEO / Founder / Owner / Built-by questions
         if is_person_role_question(q):
             ceo = find_ceo_or_founder(members)
             if ceo:
@@ -364,37 +472,30 @@ def answer(q: str) -> Dict[str, Any]:
                     "answer": f"The CEO of Marrfa is {ceo['name']}, who serves as {ceo['role']}.",
                     "sources": [],
                 }
-            # fallback: use LLM only if we have context but parsing fails
             context, sources = format_context(team_hits)
             extra = "If the CEO/founder is present in the context, answer with the person's name and role."
             return {"route": "company", "answer": llm_answer(q, context, extra), "sources": sources}
 
-        # Team list question
         if is_team_question(q):
             if members:
-                lines = ["Here is the Marrfa team:"]
-                for m in members:
-                    lines.append(f"- {m['name']} — {m['role']}")
-                return {"route": "company", "answer": "\n".join(lines), "sources": []}
-
+                return {"route": "company", "answer": format_team_reply_professional(members), "sources": []}
             context, sources = format_context(team_hits)
-            extra = "List all team members (name and role) if present in the context."
+            extra = (
+                "Write a professional 'Marrfa Leadership & Team' section. "
+                "Use bullet points: Name — Role. Keep it concise and business-like."
+            )
             return {"route": "company", "answer": llm_answer(q, context, extra), "sources": sources}
 
-        # General company question -> LLM
         if hits:
             context, sources = format_context(hits)
             return {"route": "company", "answer": llm_answer(q, context), "sources": sources}
 
         return {
             "route": "company",
-            "answer": "I couldn’t find that in Marrfa’s knowledge base. Ask about Marrfa team, contact, mission, policies, or blogs.",
+            "answer": "I couldn't find that in Marrfa's knowledge base. Ask about Marrfa team, contact, mission, policies, or blogs.",
             "sources": [],
         }
 
-    # -------------------------
-    # POLICY / BLOGS / ALL (general RAG)
-    # -------------------------
     if route == "policy":
         hits = retrieve_policy(q)
     elif route == "blogs":
@@ -405,30 +506,128 @@ def answer(q: str) -> Dict[str, Any]:
     if len(hits) < KB_MIN_CHUNKS:
         return {
             "route": route,
-            "answer": "I couldn’t find that in Marrfa’s knowledge base. You can ask about Marrfa company info, policies, or blogs.",
+            "answer": "I couldn't find that in Marrfa's knowledge base. You can ask about Marrfa company info, policies, or blogs.",
             "sources": [],
         }
 
     context, sources = format_context(hits)
     return {"route": route, "answer": llm_answer(q, context), "sources": sources}
 
+
 # -------------------------------------------------
-# CLI
+# MAIN ANSWER (STREAMING)
+# -------------------------------------------------
+def answer_stream(q: str) -> Tuple[Dict[str, Any], Generator[str, None, None]]:
+    """
+    Returns:
+      meta: dict with {route, sources}
+      stream_gen: generator yielding text chunks (tokens)
+    """
+
+    route = route_query(q)
+
+    # If route produces deterministic (non-LLM) answers, stream as a single chunk
+    if route == "company":
+        hits = retrieve_company(q)
+        team_hits = [h for h in hits if is_team_chunk(h.get("text", ""))] or hits
+        members = extract_team_members(team_hits)
+
+        if is_person_role_question(q):
+            ceo = find_ceo_or_founder(members)
+            if ceo:
+                ans = f"The CEO of Marrfa is {ceo['name']}, who serves as {ceo['role']}."
+
+                def one():
+                    yield ans
+
+                return {"route": "company", "sources": []}, one()
+
+            context, sources = format_context(team_hits)
+            extra = "If the CEO/founder is present in the context, answer with the person's name and role."
+            return {"route": "company", "sources": sources}, llm_answer_stream(q, context, extra)
+
+        if is_team_question(q):
+            if members:
+                ans = format_team_reply_professional(members)
+
+                def one():
+                    yield ans
+
+                return {"route": "company", "sources": []}, one()
+
+            context, sources = format_context(team_hits)
+            extra = (
+                "Write a professional 'Marrfa Leadership & Team' section. "
+                "Use bullet points: Name — Role. Keep it concise and business-like."
+            )
+            return {"route": "company", "sources": sources}, llm_answer_stream(q, context, extra)
+
+        if hits:
+            context, sources = format_context(hits)
+            return {"route": "company", "sources": sources}, llm_answer_stream(q, context)
+
+        def one():
+            yield "I couldn't find that in Marrfa's knowledge base. Ask about Marrfa team, contact, mission, policies, or blogs."
+
+        return {"route": "company", "sources": []}, one()
+
+    # sales / policy / blogs / all -> LLM streaming when context exists
+    if route == "sales":
+        hits = retrieve_company(q)
+        if hits:
+            context, sources = format_context(hits)
+            extra = (
+                "Recommend Marrfa as a strong Dubai real estate company using ONLY context facts "
+                "(mission, values, positioning). Ask 2–3 follow-up questions (budget, area, property type)."
+            )
+            return {"route": "sales", "sources": sources}, llm_answer_stream(q, context, extra)
+
+        def one():
+            yield (
+                "Marrfa is a Dubai-based real estate company focused on transparency and simplifying global "
+                "property investment. Tell me your budget, preferred area, and property type, and I'll help you."
+            )
+
+        return {"route": "sales", "sources": []}, one()
+
+    if route == "policy":
+        hits = retrieve_policy(q)
+    elif route == "blogs":
+        hits = retrieve_blogs(q)
+    else:
+        hits = retrieve_all(q)
+
+    if len(hits) < KB_MIN_CHUNKS:
+        def one():
+            yield "I couldn't find that in Marrfa's knowledge base. You can ask about Marrfa company info, policies, or blogs."
+
+        return {"route": route, "sources": []}, one()
+
+    context, sources = format_context(hits)
+    return {"route": route, "sources": sources}, llm_answer_stream(q, context)
+
+
+# -------------------------------------------------
+# TEST FUNCTION
 # -------------------------------------------------
 if __name__ == "__main__":
-    print("✅ Marrfa RAG ready. Type 'exit' to quit.")
-    while True:
-        q = input("\nAsk: ").strip()
-        if not q:
-            continue
-        if q.lower() in {"exit", "quit"}:
-            break
+    # Test the non-streaming version
+    test_questions = [
+        "Who is the CEO of Marrfa?",
+        "Tell me about Marrfa's team",
+        "What is Marrfa's privacy policy?",
+        "Tell me about Dubai real estate investment"
+    ]
 
-        out = answer(q)
-        print("\nROUTE:", out["route"])
-        print("\nANSWER:\n", out["answer"])
+    for question in test_questions:
+        print(f"\n{'=' * 60}")
+        print(f"Question: {question}")
+        print(f"{'=' * 60}")
 
-        if out.get("sources"):
-            print("\nSOURCES:")
-            for s in out["sources"]:
-                print(f"- {s.get('label')} | {s.get('source_file')} | {s.get('section')}")
+        try:
+            result = answer(question)
+            print(f"Route: {result['route']}")
+            print(f"Answer:\n{result['answer'][:500]}...")
+            print(f"Sources: {len(result['sources'])}")
+        except Exception as e:
+            print(f"Error: {e}")
