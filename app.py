@@ -56,28 +56,81 @@ COMPANY_KEYWORDS = {
 
 # In app.py, update the PROPERTY_KEYWORDS
 PROPERTY_KEYWORDS = {
-    "property", "properties", "apartment", "villa", "rent", "buy", "dubai", "marina",
-    "downtown", "price", "bedroom", "studio", "listing", "sale", "tell me about",
-    "information about", "details about", "show me", "what is", "where is"
+    "property", "properties", "apartment", "apartments", "villa", "villas", "townhouse", "townhouses",
+    "penthouse", "penthouses", "studio",
+    "rent", "rental", "buy", "sale", "listing", "listings",
+    "dubai", "marina", "downtown", "business bay", "palm", "jvc", "dubai hills",
+    "price", "budget", "aed", "dhs", "dirham", "million", "k", "m",
+    "bed", "beds", "bedroom", "bedrooms", "br",
+    "ready to move", "off plan", "off-plan", "new launch",
+    "investment", "invest", "roi", "high roi", "rental income", "yield",
+    "tell me about", "information about", "details about",
+    "show me", "find", "search"
 }
 
 
 def is_property_specific_query(query: str) -> bool:
-    """Check if query is asking about a specific property"""
-    q = query.lower().strip()
+    """Return True only when the user is clearly asking about ONE named project/listing.
 
-    # Check for patterns like "tell me about [property name]"
-    property_phrases = ["tell me about", "information about", "details about", "what is", "show me"]
+    Important: Do NOT treat general search requests like
+    'show me apartments in Dubai Marina' as a specific-property query.
+    """
+    q = (query or "").lower().strip()
+    if not q:
+        return False
+
+    # Phrases that typically introduce a specific, named property
+    property_phrases = [
+        "tell me about",
+        "tell me more about",
+        "information about",
+        "details about",
+        "what is",
+        "what's",
+        "describe",
+    ]
+
+    # If the remainder contains any of these, it's almost certainly a FILTERED SEARCH, not a named property
+    search_markers = {
+        "property", "properties", "listing", "listings",
+        "apartment", "apartments", "flat", "flats",
+        "villa", "villas", "townhouse", "townhouses",
+        "penthouse", "penthouses", "studio",
+        "in", "at", "near", "within", "around",
+        "under", "below", "less than", "over", "above", "between", "to",
+        "budget", "aed", "dhs", "dirham", "dirhams", "million", "k", "m",
+        "bed", "beds", "bedroom", "bedrooms", "br",
+        "ready", "off plan", "off-plan", "new launch",
+        "show me", "find", "search",
+    }
 
     for phrase in property_phrases:
         if phrase in q:
-            # Remove the phrase to get the potential property name
-            potential_name = q.replace(phrase, "").strip()
-            # If there's something left after removing common words, it's likely a property name
-            if potential_name and len(potential_name) > 2:
-                return True
+            remainder = q.split(phrase, 1)[1].strip()
+            remainder = re.sub(r"^[\s:,-]+", "", remainder)
+            remainder = re.sub(r"[\?\!\.]+$", "", remainder).strip()
+
+            if not remainder or len(remainder) < 3:
+                return False
+
+            # Very long "names" are usually search requests
+            if len(remainder) > 60:
+                return False
+
+            # If remainder contains typical search/filter markers, it's not a single property name
+            low = remainder
+            for mk in search_markers:
+                if mk in {"less than", "off plan"}:
+                    if mk in low:
+                        return False
+                else:
+                    if re.search(rf"\b{re.escape(mk)}\b", low):
+                        return False
+
+            return True
 
     return False
+
 
 
 def classify_intent_simple(query_text: str) -> Dict[str, Any]:
@@ -124,11 +177,61 @@ PROPERTY_TYPES = {
 }
 
 AREAS = [
-    "dubai marina", "dubai hills", "dubai hills estate", "business bay",
-    "jvc", "jumeirah village circle", "jlt", "downtown", "arjan",
-    "dubai south", "mbr city"
+    # Popular / high-signal Dubai areas (extend as needed)
+    "dubai marina",
+    "palm jumeirah",
+    "downtown dubai",
+    "downtown",
+    "business bay",
+    "jumeirah village circle",
+    "jvc",
+    "jumeirah village triangle",
+    "jvt",
+    "dubai hills",
+    "dubai hills estate",
+    "dubai creek harbour",
+    "dubai creek harbor",
+    "dubai harbour",
+    "dubai harbor",
+    "bluewaters",
+    "bluewaters island",
+    "city walk",
+    "al barari",
+    "emirates hills",
+    "arabian ranches",
+    "damac hills",
+    "damac hills 2",
+    "dubai south",
+    "mb r city",
+    "mbr city",
+    "meydan",
+    "arjan",
+    "jlt",
+    "jumeirah lake towers",
+    "al furjan",
+    "motor city",
+    "sports city",
+    "dubai silicon oasis",
+    "dubai land",
+    "dubailand",
+    "international city",
+    "deira",
+    "bur dubai",
+    "jumeirah",
+    "umm suqeim",
+    "al sufouh",
+    "dubai media city",
+    "dubai internet city",
+    "al quoz",
+    "the greens",
+    "the views",
+    "springs",
+    "meadows",
+    "lakes",
+    "jbr",
+    "jumeirah beach residence",
+    "dubai marina jbr"
 ]
-
 
 def _normalize(s: str) -> str:
     return (s or "").lower().strip()
@@ -144,34 +247,197 @@ def _to_aed(amount: str, unit: Optional[str]) -> int:
 
 
 def parse_query_to_filters(query: str) -> Dict[str, Any]:
-    q = _normalize(query)
+    """
+    Best-effort parsing from natural language into Marrfa search params.
+
+    Supported (robust):
+    - budgets: under/below, above/over, between X and Y, "budget is X", "around X"
+    - locations: matches AREAS list; otherwise tries "in <location>"
+    - property type: apartment/villa/townhouse/penthouse/studio
+    - bedrooms: studio, 1-10 bedrooms (e.g., "2 bed", "3 bedrooms")
+    - desired count: "show me 3 properties" -> desired_count=3 (used by handler)
+    - developer: "by Emaar", "projects by DAMAC" (filtered client-side in handler)
+    """
+    q_raw = (query or "").strip()
+    q = _normalize(q_raw)
     if not q:
         return {}
 
     filters: Dict[str, Any] = {}
 
-    # area
+    # ----------------------------
+    # Desired result count
+    # ----------------------------
+    mcount = re.search(r"\bshow\s+me\s+(\d{1,2})\b", q)
+    if not mcount:
+        mcount = re.search(r"\b(\d{1,2})\s*(?:properties|listings|homes|options|results)\b", q)
+    if mcount:
+        try:
+            n = int(mcount.group(1))
+            if 1 <= n <= 50:
+                filters["desired_count"] = n
+        except Exception:
+            pass
+
+    # ----------------------------
+    # Location (area)
+    # ----------------------------
     for area in AREAS:
         if area in q:
             filters["search_query"] = area
             break
 
     if "search_query" not in filters:
-        if "abu dhabi" in q:
-            filters["search_query"] = "abu dhabi"
-        elif "sharjah" in q:
-            filters["search_query"] = "sharjah"
-        elif "uae" in q or "emirates" in q or "dubai" in q:
-            filters["search_query"] = "dubai"
+        # heuristic "in <location>" extraction
+        mloc = re.search(r"\b(?:in|at|within|around|near)\s+([a-z][a-z\s\-]{2,40})", q)
+        if mloc:
+            loc = mloc.group(1).strip()
+            # stop at common delimiters
+            loc = re.split(r"\b(under|below|over|above|between|with|for|budget|around|approx|about|studio|\d+\s*bed)\b", loc)[0].strip()
+            if loc:
+                filters["search_query"] = loc
 
-    # foreign currency detection
-    currency_pattern = r"(\d+(?:\.\d+)?)\s*(usd|eur|gbp|inr|sar|qar|omr|kwd|bhd)"
-    mcur = re.search(currency_pattern, q, re.IGNORECASE)
+    # fallback if Abu Dhabi explicitly
+    if "search_query" not in filters and "abu dhabi" in q:
+        filters["search_query"] = "abu dhabi"
+
+    # ----------------------------
+    # Developer (client-side filter)
+    # ----------------------------
+    mdev = re.search(r"\b(?:by|from)\s+([a-z0-9&\.\- ]{2,40})\b", q)
+    if not mdev:
+        mdev = re.search(r"\bprojects?\s+by\s+([a-z0-9&\.\- ]{2,40})\b", q)
+    if mdev:
+        dev = mdev.group(1).strip()
+        dev = re.split(r"\b(in|under|below|over|above|between|with)\b", dev)[0].strip()
+        if dev and len(dev) >= 2:
+            filters["developer_name"] = dev
+
+    # ----------------------------
+    # Property type
+    # ----------------------------
+    # include plurals & common synonyms
+    type_map = {
+        "villa": "Villa",
+        "villas": "Villa",
+        "townhouse": "Townhouse",
+        "townhouses": "Townhouse",
+        "apartment": "Apartment",
+        "apartments": "Apartment",
+        "flat": "Apartment",
+        "flats": "Apartment",
+        "penthouse": "Penthouse",
+        "penthouses": "Penthouse",
+        "studio": "Apartment",  # API uses bedrooms studio; type can remain Apartment
+    }
+    for k, v in type_map.items():
+        if re.search(rf"\b{re.escape(k)}\b", q):
+            filters["unit_types"] = [v]
+            break
+
+    # ----------------------------
+    # Bedrooms
+    # ----------------------------
+    # NOTE: The Marrfa properties API expects a *single* bedroom label (e.g. "2 bedroom" or "Studio").
+    # Passing a CSV list ("2 bedroom,2 bedrooms") can return 0 results.
+    # So we pass one canonical value to the API and keep the numeric target for robust client-side filtering.
+    if re.search(r"\bstudio\b", q):
+        filters["unit_bedrooms"] = "Studio"
+        filters["_desired_bedrooms"] = 0
+    else:
+        mb = re.search(r"\b(\d+)\s*(?:bed|beds|bedroom|bedrooms|br|bdrm|bdrms)\b", q)
+        if mb:
+            n = int(mb.group(1))
+            if 1 <= n <= 10:
+                filters["_desired_bedrooms"] = n
+                filters["unit_bedrooms"] = f"{n} bedroom"
+
+
+    # ----------------------------
+    # Price parsing (AED)
+    # ----------------------------
+    def _word_unit_to_multiplier(word: str) -> int:
+        word = (word or "").lower()
+        if word in ("k", "thousand"):
+            return 1_000
+        if word in ("m", "million"):
+            return 1_000_000
+        if word in ("b", "billion"):
+            return 1_000_000_000
+        return 1
+
+    def _parse_amount_token(num_s: str, unit_s: str) -> Optional[int]:
+        try:
+            n = float(num_s)
+        except Exception:
+            return None
+        mult = _word_unit_to_multiplier(unit_s)
+        return int(n * mult)
+
+    # Normalize "1 million" => "1 million" handled; also "1m", "1.5m", "500k"
+    # Range: between X and Y
+    cleaned = q
+
+    # Currency other than AED -> warning (kept as before)
+    currency_pattern = r"(\d+(?:\.\d+)?)\s*(usd|eur|gbp|inr|sar|qar|omr|kwd|bhd)\b"
+    mcur = re.search(currency_pattern, cleaned, re.IGNORECASE)
     if mcur:
         filters["foreign_currency"] = True
         filters["amount"] = mcur.group(1)
         filters["currency"] = mcur.group(2).upper()
         return filters
+
+    # Remove bedroom tokens when parsing money
+    cleaned = re.sub(r"\b\d+\s*(bed|beds|bedroom|bedrooms|br)\b", "", cleaned)
+
+    # Helper regex for amount + optional unit words/suffix
+    amt_re = r"(\d+(?:\.\d+)?)\s*(k|m|b|thousand|million|billion)?\s*(?:aed|dhs|dirham|dirhams)?"
+
+    # between X and Y
+    m = re.search(rf"\bbetween\s+{amt_re}\s+and\s+{amt_re}\b", cleaned)
+    if m:
+        low = _parse_amount_token(m.group(1), m.group(2) or "")
+        high = _parse_amount_token(m.group(3), m.group(4) or "")
+        if low is not None:
+            filters["unit_price_from"] = low
+        if high is not None:
+            filters["unit_price_to"] = high
+
+    # X to Y / X - Y
+    if "unit_price_from" not in filters and "unit_price_to" not in filters:
+        m = re.search(rf"\b{amt_re}\s*(?:-|to|–|—)\s*{amt_re}\b", cleaned)
+        if m:
+            low = _parse_amount_token(m.group(1), m.group(2) or "")
+            high = _parse_amount_token(m.group(3), m.group(4) or "")
+            if low is not None:
+                filters["unit_price_from"] = low
+            if high is not None:
+                filters["unit_price_to"] = high
+
+    # under/below/less than
+    m = re.search(rf"\b(under|below|less than|upto|up to)\s+{amt_re}\b", cleaned)
+    if m:
+        amt = _parse_amount_token(m.group(2), m.group(3) or "")
+        if amt is not None:
+            filters["unit_price_to"] = amt
+
+    # above/over/more than
+    m = re.search(rf"\b(over|above|more than)\s+{amt_re}\b", cleaned)
+    if m:
+        amt = _parse_amount_token(m.group(2), m.group(3) or "")
+        if amt is not None:
+            filters["unit_price_from"] = amt
+
+    # budget is / my budget / around / about / approx
+    if "unit_price_from" not in filters and "unit_price_to" not in filters:
+        m = re.search(rf"\b(budget\s*(?:is|=)|my\s+budget\s+is|around|about|approx(?:\.|imately)?|near)\s+{amt_re}\b", cleaned)
+        if m:
+            amt = _parse_amount_token(m.group(2), m.group(3) or "")
+            if amt is not None:
+                # treat as max budget (most common user expectation)
+                filters["unit_price_to"] = amt
+
+    return filters
 
     cleaned = re.sub(r"\b\d+\s*(bed|beds|bedroom|bedrooms|room|rooms)\b", "", q)
 
@@ -331,32 +597,168 @@ def handle_property_query(query_text: str) -> Dict[str, Any]:
             "properties": [],
             "properties_full": [],
             "total": 0,
-            "filters_used": {**filters, "intent": "PROPERTY", "currency_warning": True},
+            "filters_used": {**{k: v for k, v in filters.items() if not str(k).startswith('_')}, "intent": "PROPERTY", "currency_warning": True},
         }
 
     filters.setdefault("search_query", "dubai")
     filters["page"] = 1
-    filters["per_page"] = 15
+    filters["per_page"] = min(15, int(filters.get("desired_count", 15)))
 
-    properties_min, properties_full = search_properties(filters)
+    # ----------------------------
+    # API search + smart fallbacks
+    # ----------------------------
+    # The properties API can be strict/picky about some params (especially `unit_types` and `unit_bedrooms`).
+    # We try the strict query first, then relax filters if it returns 0 results, and finally apply
+    # our own robust client-side filters below.
+    strict_filters = dict(filters)
+    properties_min, properties_full = search_properties(strict_filters)
+
+    # 1) If nothing found and type was specified, retry WITHOUT type (we'll filter by type locally).
+    if not properties_min and strict_filters.get("unit_types"):
+        relaxed = dict(strict_filters)
+        relaxed.pop("unit_types", None)
+        properties_min, properties_full = search_properties(relaxed)
+        # keep what user asked for so client-side filter still knows intent
+        filters = relaxed
+        filters["unit_types"] = strict_filters.get("unit_types")
+
+    # 2) If still nothing and bedrooms was specified, retry WITHOUT bedrooms (we'll filter by bedrooms locally).
+    if not properties_min and strict_filters.get("unit_bedrooms"):
+        relaxed = dict(filters)
+        relaxed.pop("unit_bedrooms", None)
+        properties_min, properties_full = search_properties(relaxed)
+        filters = relaxed
+        filters["unit_bedrooms"] = strict_filters.get("unit_bedrooms")
+
+    # ----------------------------
+    # Client-side filtering (in case API search is broad)
+    # ----------------------------
+    def _ci_contains(hay: str, needle_s: str) -> bool:
+        return needle_s.lower() in (hay or "").lower()
+
+    dev_filter = (filters.get("developer_name") or "").strip()
+    if dev_filter:
+        keep_ids = []
+        for p in properties_full:
+            if _ci_contains(str(p.get("developer") or ""), dev_filter):
+                keep_ids.append(p.get("id"))
+        properties_full = [p for p in properties_full if p.get("id") in keep_ids]
+        properties_min = [p for p in properties_min if p.get("id") in keep_ids]
+
+    # Ensure location match when we extracted a location phrase
+    loc_filter = (filters.get("search_query") or "").strip()
+    if loc_filter and loc_filter not in ("dubai", "abu dhabi"):
+        keep_ids = []
+        for p in properties_full:
+            if _ci_contains(str(p.get("area") or p.get("location") or ""), loc_filter):
+                keep_ids.append(p.get("id"))
+        if keep_ids:
+            properties_full = [p for p in properties_full if p.get("id") in keep_ids]
+            properties_min = [p for p in properties_min if p.get("id") in keep_ids]
+
+    # Ensure property type match when the user asked for a type (apartment/villa/townhouse/penthouse).
+    # We do this client-side because the API's `unit_types` values can vary (e.g., "Attached Villa", etc.).
+    requested_types = filters.get("unit_types") or []
+    if isinstance(requested_types, str):
+        requested_types = [requested_types]
+    requested_types = [t.strip().lower() for t in requested_types if str(t).strip()]
+
+    if requested_types:
+        # Map our high-level intent to a set of keywords we can match in payload fields.
+        type_keywords = {
+            "apartment": {"apartment", "apart", "flat", "apt"},
+            "villa": {"villa"},
+            "townhouse": {"townhouse", "town house"},
+            "penthouse": {"penthouse"},
+        }
+
+        wanted = set()
+        for t in requested_types:
+            wanted |= type_keywords.get(t.lower(), {t.lower()})
+
+        keep_ids = []
+        for p in properties_full:
+            # Try a few likely fields from the Marrfa payload
+            candidates = []
+            for k in ("unit_types", "unit_type", "property_type", "type", "category", "unitType"):
+                v = p.get(k) if isinstance(p, dict) else None
+                if v is None:
+                    continue
+                if isinstance(v, list):
+                    candidates.extend([str(x) for x in v])
+                else:
+                    candidates.append(str(v))
+
+            hay = " ".join(candidates).lower()
+            if any(kw in hay for kw in wanted):
+                keep_ids.append(p.get("id"))
+
+        if keep_ids:
+            properties_full = [p for p in properties_full if p.get("id") in keep_ids]
+            properties_min = [p for p in properties_min if p.get("id") in keep_ids]
+
+    # Ensure bedrooms match when we extracted bedrooms
+    desired_beds = filters.get("_desired_bedrooms", None)
+    if desired_beds is not None:
+        keep_ids = []
+        for p in properties_full:
+            # Try multiple possible fields from API payloads
+            candidates = []
+            for k in (
+                "unit_bedrooms", "unit_bedroom", "bedrooms", "bedroom",
+                "unit_bedrooms_text", "unit_bedrooms_label",
+                "min_bedrooms", "max_bedrooms", "bedrooms_from", "bedrooms_to",
+                "units_bedrooms", "unitBedrooms", "unitBedroomsText"
+            ):
+                v = p.get(k) if isinstance(p, dict) else None
+                if v is not None:
+                    candidates.append(v)
+
+            hay = " ".join([str(x) for x in candidates]).lower()
+
+            if desired_beds == 0:
+                if "studio" in hay or re.search(r"\b0\b", hay):
+                    keep_ids.append(p.get("id"))
+            else:
+                # match '2 bed', '2 bedroom', '2 bedrooms', etc.
+                if re.search(rf"\b{int(desired_beds)}\s*(?:bed|beds|bedroom|bedrooms|br)\b", hay):
+                    keep_ids.append(p.get("id"))
+                else:
+                    # sometimes APIs provide numeric min/max bedroom fields
+                    try:
+                        mn = int(p.get("min_bedrooms")) if p.get("min_bedrooms") is not None else None
+                        mx = int(p.get("max_bedrooms")) if p.get("max_bedrooms") is not None else None
+                        if mn is not None and mx is not None and mn <= int(desired_beds) <= mx:
+                            keep_ids.append(p.get("id"))
+                        elif mn is not None and mx is None and mn == int(desired_beds):
+                            keep_ids.append(p.get("id"))
+                    except Exception:
+                        pass
+
+        if keep_ids:
+            properties_full = [p for p in properties_full if p.get("id") in keep_ids]
+            properties_min = [p for p in properties_min if p.get("id") in keep_ids]
+
+
     total = len(properties_min)
+
+
+    public_filters = {k: v for k, v in filters.items() if not str(k).startswith('_')}
 
     if total == 0:
         return {
             "reply": (
-                "I apologize, but I couldn't find any properties that match your specific criteria. "
-                "I recommend adjusting your search parameters, such as expanding your budget range, "
-                "considering different areas in Dubai, or exploring alternative property types. "
-                "Would you like assistance with refining your search?"
+                "Sorry — I couldn’t find any properties that match those criteria. "
+                "Try changing the budget, area, property type, or bedrooms (for example: ‘2 bed apartment in Dubai Marina under 2M AED’)."
             ),
             "properties": [],
             "properties_full": [],
             "total": 0,
-            "filters_used": {**filters, "intent": "PROPERTY"},
+            "filters_used": {**public_filters, "intent": "PROPERTY"},
         }
 
     loc = str(filters.get("search_query", "Dubai")).title()
-    reply = f"I've found {min(15, total)} properties available in {loc} that match your criteria. " \
+    reply = f"I've found {min(int(filters.get('desired_count', 15)), total)} properties available in {loc} that match your criteria. " \
             f"Each listing includes detailed information about the property, including location, " \
             f"developer, completion year, and pricing. Please review the options below."
 
@@ -365,7 +767,7 @@ def handle_property_query(query_text: str) -> Dict[str, Any]:
         "properties": properties_min[:15],
         "properties_full": properties_full[:15],
         "total": total,
-        "filters_used": {**filters, "intent": "PROPERTY"},
+        "filters_used": {**public_filters, "intent": "PROPERTY"},
     }
 
 
