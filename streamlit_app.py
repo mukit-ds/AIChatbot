@@ -7,6 +7,7 @@ from collections import defaultdict
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # -------------------------
@@ -252,6 +253,8 @@ if "history" not in st.session_state:
     st.session_state.history: List[Dict[str, Any]] = []
 if "api_status" not in st.session_state:
     st.session_state.api_status = "unknown"
+if "_scroll_to_bottom" not in st.session_state:
+    st.session_state._scroll_to_bottom = False
 
 
 # -------------------------
@@ -601,6 +604,20 @@ def render_assistant(text_html: str):
     )
 
 
+
+def push_user_query(q: str):
+    q = (q or '').strip()
+    if not q:
+        return
+    st.session_state.history.append({
+        'id': str(uuid.uuid4())[:8],
+        'q': q,
+        'reply': '',
+        'data': {}
+    })
+    st.session_state._scroll_to_bottom = True
+    st.rerun()
+
 def render_cover_image(url: str):
     st.markdown(
         f"""
@@ -759,11 +776,16 @@ else:
                     cover = p.get("cover_image") or ""
                     listing_url = p.get("listing_url") or "#"
 
-                    img_html = ""
+                    # Image: clicking the image opens the property page
+                    img_inner = ""
                     if cover:
-                        img_html = f'<img src="{escape_html(cover)}" style="width:100%;height:200px;object-fit:cover;display:block;">'
+                        img_inner = f'<img src="{escape_html(cover)}" style="width:100%;height:200px;object-fit:cover;display:block;">'
                     else:
-                        img_html = '<div style="width:100%;height:200px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;color:#6b7280;">No image</div>'
+                        img_inner = '<div style="width:100%;height:200px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;color:#6b7280;">No image</div>'
+                    if listing_url and listing_url != "#":
+                        img_html = f'<a href="{escape_html(listing_url)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:block;">{img_inner}</a>'
+                    else:
+                        img_html = img_inner
 
                     st.markdown(
                         f"""
@@ -775,18 +797,16 @@ else:
       <div class="meta-line"><span class="meta-icon">📍</span><span>{escape_html(str(location))}</span></div>
       <div class="meta-line"><span class="meta-icon">🏗️</span><span>{escape_html(str(developer))}</span></div>
     </div>
-    <div style="margin-top:10px;">
-      <a href="{escape_html(listing_url)}" target="_blank" style="text-decoration:none;">
-        <button style="width:100%;border:none;border-radius:12px;padding:10px 16px;font-weight:700;background:#111827;color:#fff;cursor:pointer;">
-          View Details
-        </button>
-      </a>
-    </div>
   </div>
 </div>
-                        """,
+    """,
                         unsafe_allow_html=True
                     )
+
+                    # View Details: ask the chatbot about this property (instead of opening a link)
+                    btn_key = f"view_details_{item.get('id','msg')}_{i}"
+                    if st.button("View Details", key=btn_key, use_container_width=True):
+                        push_user_query(f"Tell me about {title}")
 
 
 # -------------------------
@@ -808,13 +828,22 @@ with st.form("sticky_form", clear_on_submit=True):
         st.markdown("</div>", unsafe_allow_html=True)
 
     if submitted and prompt.strip():
-        st.session_state.history.append({
-            "id": str(uuid.uuid4())[:8],
-            "q": prompt.strip(),
-            "reply": "",
-            "data": {}
-        })
-        st.rerun()
+        push_user_query(prompt.strip())
+
+# -------------------------
+# Auto-scroll to the newest message (after button-driven queries)
+# -------------------------
+st.markdown('<div id="chat-bottom"></div>', unsafe_allow_html=True)
+
+if st.session_state.get("_scroll_to_bottom", False):
+    components.html(
+        """<script>
+          const el = window.parent.document.getElementById("chat-bottom");
+          if (el) { el.scrollIntoView({behavior: "smooth", block: "end"}); }
+        </script>""",
+        height=0,
+    )
+    st.session_state._scroll_to_bottom = False
 
 st.markdown("</div></div></div>", unsafe_allow_html=True)
 
