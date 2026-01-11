@@ -1,33 +1,83 @@
+import os
 import json
 import uuid
+import re
+from typing import Any, Dict, List, Generator, Optional
+from collections import defaultdict
+
 import requests
 import streamlit as st
-from typing import Any, Dict, List, Generator
+
 
 # -------------------------
 # Config
 # -------------------------
-API_BASE = "http://127.0.0.1:9000"
+API_BASE = os.environ.get("API_BASE_URL", "http://127.0.0.1:9000").rstrip("/")
 STREAM_URL = f"{API_BASE}/chat/stream"
+HEALTH_URL = f"{API_BASE}/health"
 
-st.set_page_config(page_title="Marrfa AI", page_icon="🏠", layout="wide")
+# Marrfa API for full specific-property details (like streamlit_app2.py)
+MARRFA_PROPERTY_API_BASE = os.environ.get("MARRFA_PROPERTY_API_BASE", "https://apiv2.marrfa.com").rstrip("/")
+MARRFA_SITE_BASE = "https://www.marrfa.com"
+
+# Images
+MAX_IMAGES_TO_SHOW = 15          # ✅ total max across categories
+COLS_PER_ROW = 3
+MAIN_IMG_HEIGHT = 480            # ✅ bigger cover image
+THUMB_IMG_HEIGHT = 190           # ✅ bigger thumbnails
+
+
+# Hard blocked dev logo(s) (same idea as streamlit_app2.py)
+HARD_BLOCKED_IMAGE_URLS = {
+    "https://storage.googleapis.com/xdil-qda0-zofk.m2.xano.io/vault/ZZLvFZFt/GyI8f6kUS3MXO1cH4u7yT8Ibb_8/VIxZOw../313416330_5562915650429278_8926004611552043340_n.jpeg"
+}
+HARD_BLOCKED_FILENAMES = {
+    "313416330_5562915650429278_8926004611552043340_n.jpeg"
+}
+
 
 # -------------------------
-# CSS (no sidebar + sticky input + carousel)
+# Page config
+# -------------------------
+st.set_page_config(
+    page_title="Marrfa AI",
+    page_icon="🏠",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
+
+# -------------------------
+# CSS
 # -------------------------
 st.markdown(
-    """
+    f"""
 <style>
-header, footer { visibility: hidden; height: 0; }
+header, footer {{ visibility: hidden; height: 0; }}
+section[data-testid="stSidebar"] {{ display: none !important; }}
+div[data-testid="collapsedControl"] {{ display: none !important; }}
 
-section[data-testid="stSidebar"] { display: none !important; }
-div[data-testid="collapsedControl"] { display: none !important; }
+.block-container {{ max-width: 1200px; padding-top: 26px; padding-bottom: 120px; }}
 
-.block-container { max-width: 1200px; padding-top: 26px; padding-bottom: 120px; }
+.deployment-badge {{
+    position: fixed;
+    top: 0;
+    right: 0;
+    background: {"#10b981" if ENVIRONMENT == "production" else "#f59e0b"};
+    color: white;
+    padding: 4px 12px;
+    border-radius: 0 0 0 10px;
+    font-size: 11px;
+    font-weight: 600;
+    z-index: 10000;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}}
 
-/* bubbles */
-.msg-wrap { display:flex; justify-content:flex-start; margin: 10px 0 14px 0; }
-.msg-bubble {
+.msg-wrap {{ display:flex; justify-content:flex-start; margin: 10px 0 14px 0; }}
+.msg-bubble {{
     background: #F3F4F6;
     color: #111827;
     padding: 14px 18px;
@@ -36,11 +86,10 @@ div[data-testid="collapsedControl"] { display: none !important; }
     box-shadow: 0 1px 0 rgba(0,0,0,0.04);
     font-size: 15px;
     line-height: 1.5;
-}
-.user-bubble { background: #EEF2F6; }
+}}
+.user-bubble {{ background: #EEF2F6; }}
 
-/* loading indicator */
-.loading-bubble {
+.loading-bubble {{
     background: #F3F4F6;
     color: #6B7280;
     padding: 14px 18px;
@@ -51,10 +100,8 @@ div[data-testid="collapsedControl"] { display: none !important; }
     line-height: 1.5;
     display: flex;
     align-items: center;
-    animation: pulse 1.5s ease-in-out infinite;
-}
-
-.dot {
+}}
+.dot {{
     height: 8px;
     width: 8px;
     background-color: #6B7280;
@@ -62,185 +109,58 @@ div[data-testid="collapsedControl"] { display: none !important; }
     display: inline-block;
     margin: 0 2px;
     animation: bounce 1.4s infinite ease-in-out both;
-}
+}}
+.dot:nth-child(1) {{ animation-delay: -0.32s; }}
+.dot:nth-child(2) {{ animation-delay: -0.16s; }}
+@keyframes bounce {{
+    0%, 80%, 100% {{ transform: scale(0); }}
+    40% {{ transform: scale(1.0); }}
+}}
 
-.dot:nth-child(1) { animation-delay: -0.32s; }
-.dot:nth-child(2) { animation-delay: -0.16s; }
-
-@keyframes bounce {
-    0%, 80%, 100% { transform: scale(0); }
-    40% { transform: scale(1.0); }
-}
-
-@keyframes pulse {
-    0% { opacity: 0.8; }
-    50% { opacity: 1; }
-    100% { opacity: 0.8; }
-}
-
-/* property card */
-.prop-card { 
-    background: white; 
-    border-radius: 18px; 
-    border: 1px solid #EEE; 
-    overflow: hidden;
-    box-shadow: 0 2px 16px rgba(0,0,0,0.04); 
-    margin-bottom: 10px; 
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-}
-.prop-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-}
-
-/* Image carousel */
-.image-carousel {
-    position: relative;
-    width: 100%;
-    height: 200px;
-    overflow: hidden;
-    border-radius: 10px 10px 0 0;
-}
-
-.carousel-image {
-    width: 100%;
-    height: 200px;
-    object-fit: cover;
-    display: block;
-    transition: opacity 0.5s ease;
-}
-
-.carousel-dots {
-    position: absolute;
-    bottom: 10px;
-    left: 0;
-    right: 0;
-    display: flex;
-    justify-content: center;
-    gap: 6px;
-    z-index: 10;
-}
-
-.carousel-dot {
-    width: 8px;
-    height: 8px;
-    background: rgba(255, 255, 255, 0.6);
-    border-radius: 50%;
-    cursor: pointer;
-    transition: background 0.3s ease, transform 0.3s ease;
-}
-
-.carousel-dot.active {
-    background: white;
-    transform: scale(1.2);
-}
-
-.carousel-nav {
-    position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
-    background: rgba(0, 0, 0, 0.3);
-    color: white;
-    border: none;
-    border-radius: 50%;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    z-index: 10;
-    transition: background 0.3s ease;
-}
-
-.carousel-nav:hover {
-    background: rgba(0, 0, 0, 0.5);
-}
-
-.carousel-prev {
-    left: 10px;
-}
-
-.carousel-next {
-    right: 10px;
-}
-
-.carousel-nav.hidden {
-    display: none;
-}
-
-.prop-body { padding: 14px 14px 6px 14px; }
-.prop-title { 
-    font-size: 18px; 
-    font-weight: 800; 
-    margin: 0; 
-    color: #111827; 
-    line-height: 1.3;
-    margin-bottom: 8px;
-}
-.prop-description {
-    color: #4B5563;
-    font-size: 14px;
-    line-height: 1.4;
-    margin-bottom: 12px;
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-}
-.meta-box { 
-    margin-top: 10px; 
-    background: #F3F4F6; 
-    border-radius: 14px; 
-    padding: 10px 12px; 
-}
-.meta-line { 
-    display: flex; 
-    gap: 10px; 
-    align-items: flex-start; 
-    color: #374151; 
-    font-size: 14px; 
-    margin: 8px 0; 
-}
-.meta-icon { 
-    width: 18px; 
-    display: inline-block; 
-    opacity: 0.9; 
-    flex-shrink: 0;
-}
-.small-muted { 
-    color: #6B7280; 
-    font-size: 13px; 
+.small-muted {{
+    color: #6B7280;
+    font-size: 13px;
     margin-bottom: 10px;
-}
+}}
 
-/* View details button */
-.view-details-btn {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    border: none;
-    border-radius: 12px;
-    padding: 10px 16px;
+.prop-card {{
+    background: white;
+    border-radius: 18px;
+    border: 1px solid #EEE;
+    overflow: hidden;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.04);
+    margin-bottom: 10px;
+}}
+
+.prop-body {{ padding: 14px 14px 6px 14px; }}
+.prop-title {{
+    font-size: 18px;
+    font-weight: 800;
+    margin: 0 0 8px 0;
+    color: #111827;
+    line-height: 1.3;
+}}
+
+.meta-box {{
+    margin-top: 10px;
+    background: #F3F4F6;
+    border-radius: 14px;
+    padding: 10px 12px;
+}}
+.meta-line {{
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    color: #374151;
     font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    width: 100%;
-    margin-top: 8px;
-    text-align: center;
-}
+    margin: 8px 0;
+}}
+.meta-icon {{ width: 18px; display: inline-block; opacity: 0.9; flex-shrink: 0; }}
 
-.view-details-btn:hover {
-    opacity: 0.9;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-}
-
-/* sticky input */
-.sticky-wrap{
-  position: fixed; 
-  left: 0; 
-  right: 0; 
+.sticky-wrap{{
+  position: fixed;
+  left: 0;
+  right: 0;
   bottom: 0;
   background: rgba(255,255,255,0.95);
   backdrop-filter: blur(10px);
@@ -248,23 +168,23 @@ div[data-testid="collapsedControl"] { display: none !important; }
   padding: 14px 0;
   z-index: 9999;
   box-shadow: 0 -2px 20px rgba(0,0,0,0.05);
-}
-.sticky-inner{ 
-    max-width: 1200px; 
-    margin: 0 auto; 
-    padding: 0 16px; 
-}
-.sticky-row{ 
-    display: flex; 
-    gap: 10px; 
-    align-items: center; 
-    background: white; 
+}}
+.sticky-inner{{
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 16px;
+}}
+.sticky-row{{
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    background: white;
     border: 1px solid #D1D5DB;
-    border-radius: 14px; 
+    border-radius: 14px;
     padding: 12px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-}
-.sticky-inner .stTextInput > div > div > input{
+}}
+.sticky-inner .stTextInput > div > div > input{{
   border-radius: 12px !important;
   height: 44px !important;
   padding: 10px 12px !important;
@@ -272,51 +192,56 @@ div[data-testid="collapsedControl"] { display: none !important; }
   border: none !important;
   background: #F3F4F6 !important;
   color: #111827 !important;
-}
-.send-btn button{
-  width: 44px !important; 
+}}
+.send-btn button{{
+  width: 44px !important;
   height: 44px !important;
   border-radius: 10px !important;
   border: 1px solid #D1D5DB !important;
   background: white !important;
   font-size: 18px !important;
   padding: 0 !important;
-  transition: all 0.2s ease;
-}
-.send-btn button:hover { 
-    border-color: #9CA3AF !important; 
-    background: #F3F4F6 !important;
-}
+}}
 
-/* Property image counter */
-.image-counter {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    background: rgba(0, 0, 0, 0.6);
-    color: white;
-    font-size: 12px;
-    padding: 4px 8px;
-    border-radius: 12px;
-    z-index: 10;
-}
+.cat-title {{
+  margin-top: 0.4rem;
+  margin-bottom: 0.25rem;
+  font-weight: 800;
+}}
 
-/* Empty image placeholder */
-.empty-img {
-    width: 100%;
-    height: 200px;
-    background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #6B7280;
-    font-size: 14px;
-    border-radius: 10px 10px 0 0;
-}
+.marrfa-main-card {{
+  border: 1px solid #e6e6e6;
+  border-radius: 14px;
+  background: #fff;
+  padding: 10px;
+  box-shadow: 0 1px 0 rgba(0,0,0,0.02);
+  margin: 8px 0 10px 0;
+}}
+.marrfa-main-card img {{
+  width: 100%;
+  height: {MAIN_IMG_HEIGHT}px;
+  object-fit: cover;
+  border-radius: 12px;
+  display: block;
+  background: #fff;
+}}
+
+.marrfa-thumb img {{
+  width: 100%;
+  height: {THUMB_IMG_HEIGHT}px;
+  object-fit: cover;
+  border-radius: 12px;
+  display: block;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+}}
 </style>
+
+<div class="deployment-badge">{ENVIRONMENT}</div>
     """,
     unsafe_allow_html=True
 )
+
 
 # -------------------------
 # State
@@ -325,12 +250,8 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "history" not in st.session_state:
     st.session_state.history: List[Dict[str, Any]] = []
-if "selected_raw" not in st.session_state:
-    st.session_state.selected_raw = {}
-if "selected_title" not in st.session_state:
-    st.session_state.selected_title = ""
-if "carousel_states" not in st.session_state:
-    st.session_state.carousel_states = {}
+if "api_status" not in st.session_state:
+    st.session_state.api_status = "unknown"
 
 
 # -------------------------
@@ -344,39 +265,251 @@ def escape_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def fmt_price(raw: Dict[str, Any]) -> str:
-    min_aed = raw.get("min_price_aed") or raw.get("min_price")
-    max_aed = raw.get("max_price_aed") or raw.get("max_price")
-    cur = raw.get("price_currency") or "AED"
-
+def check_api_health() -> bool:
     try:
-        if min_aed and max_aed:
-            min_val = float(min_aed) if isinstance(min_aed, (int, float, str)) else 0
-            max_val = float(max_aed) if isinstance(max_aed, (int, float, str)) else 0
-            return f"{min_val:,.0f} – {max_val:,.0f} {cur}"
-        if min_aed:
-            min_val = float(min_aed) if isinstance(min_aed, (int, float, str)) else 0
-            return f"from {min_val:,.0f} {cur}"
-        if max_aed:
-            max_val = float(max_aed) if isinstance(max_aed, (int, float, str)) else 0
-            return f"up to {max_val:,.0f} {cur}"
-    except:
+        r = requests.get(HEALTH_URL, timeout=5)
+        if r.status_code == 200:
+            st.session_state.api_status = "healthy"
+            return True
+    except Exception:
         pass
-    return "Price not available"
+    st.session_state.api_status = "unreachable"
+    return False
 
 
-def fmt_completion(raw: Dict[str, Any], p: Dict[str, Any]) -> str:
-    y = p.get("completion_year")
-    if y:
-        return str(y)
-    dt = raw.get("completion_datetime") or raw.get("completion_date")
-    if isinstance(dt, str) and len(dt) >= 10:
-        return dt[:10]
-    if isinstance(dt, str) and len(dt) >= 4:
-        return dt[:4]
+def fmt_price(raw: Dict[str, Any]) -> str:
+    cur = raw.get("price_currency") or raw.get("currency") or "AED"
+
+    def _num(x):
+        try:
+            if x is None:
+                return None
+            if isinstance(x, (int, float)):
+                return float(x)
+            s = str(x).strip().replace(",", "")
+            return float(s) if s else None
+        except Exception:
+            return None
+
+    mn = _num(raw.get("min_price_aed") or raw.get("min_price") or raw.get("price_from") or raw.get("starting_price"))
+    mx = _num(raw.get("max_price_aed") or raw.get("max_price") or raw.get("price_to") or raw.get("ending_price"))
+
+    if mn is not None and mx is not None:
+        return f"{cur} {mn:,.0f} – {mx:,.0f}"
+    if mn is not None:
+        return f"{cur} {mn:,.0f}+"
+    if mx is not None:
+        return f"Up to {cur} {mx:,.0f}"
     return "N/A"
 
 
+def fmt_area(raw: Dict[str, Any]) -> str:
+    unit = raw.get("area_unit") or raw.get("size_unit") or "sqft"
+
+    def _num(x):
+        try:
+            if x is None:
+                return None
+            if isinstance(x, (int, float)):
+                return float(x)
+            s = str(x).strip().replace(",", "")
+            return float(s) if s else None
+        except Exception:
+            return None
+
+    mn = _num(raw.get("min_area") or raw.get("min_size") or raw.get("starting_area") or raw.get("from_area"))
+    mx = _num(raw.get("max_area") or raw.get("max_size") or raw.get("ending_area") or raw.get("to_area"))
+
+    if mn is not None and mx is not None:
+        return f"{mn:,.0f} – {mx:,.0f} {unit}"
+    if mn is not None:
+        return f"{mn:,.0f}+ {unit}"
+    if mx is not None:
+        return f"Up to {mx:,.0f} {unit}"
+
+    single = _num(raw.get("size") or raw.get("area_size") or raw.get("built_up_area") or raw.get("plot_area"))
+    if single is not None:
+        return f"{single:,.0f} {unit}"
+    return "N/A"
+
+
+# ----------------------------
+# Specific-property image extraction (website order)
+# (ported from streamlit_app2.py)
+# ----------------------------
+def _normalize_url(u: Optional[str]) -> str:
+    return (u or "").strip()
+
+
+def _should_exclude_url(url: str, blocked_urls: List[str]) -> bool:
+    u = (url or "").strip()
+    if not u:
+        return True
+    if u in HARD_BLOCKED_IMAGE_URLS:
+        return True
+    ul = u.lower()
+    fname = ul.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
+    if fname in HARD_BLOCKED_FILENAMES:
+        return True
+    if u in blocked_urls:
+        return True
+
+    branding_markers = ["logo", "brand", "developer_logo", "favicon", "icon"]
+    if any(m in ul for m in branding_markers):
+        if any(ext in ul for ext in [".svg", "favicon", ".ico", "icon"]):
+            return True
+        if "/logo" in ul or "logo_" in ul or "_logo" in ul:
+            return True
+    return False
+
+
+def _pick_images_with_categories(resp_json: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    Exact website order: Architecture -> Interior -> Facilities
+    :contentReference[oaicite:1]{index=1}
+    """
+    found: List[Dict[str, str]] = []
+    seen_urls = set()
+
+    prop_data = resp_json.get("data", resp_json) if isinstance(resp_json, dict) else {}
+    blocked = []
+    if isinstance(prop_data, dict):
+        blocked += [
+            _normalize_url(prop_data.get("developer_logo")),
+            _normalize_url(prop_data.get("developer_logo_url")),
+            _normalize_url(prop_data.get("developerLogo")),
+            _normalize_url(prop_data.get("developerLogoUrl")),
+            _normalize_url((prop_data.get("developer") or {}).get("logo") if isinstance(prop_data.get("developer"), dict) else None),
+        ]
+    blocked_urls = [u for u in blocked if u]
+
+    def add_url(url: Any, cat: str):
+        if not isinstance(url, str):
+            return
+        u = url.strip()
+        if not u or not (u.startswith("http") or u.startswith("//")):
+            return
+        if _should_exclude_url(u, blocked_urls):
+            return
+        if u in seen_urls:
+            return
+        seen_urls.add(u)
+        found.append({"url": u, "category": cat})
+
+    def extract_from_list(lst: Any, cat: str):
+        if not isinstance(lst, list):
+            return
+        for item in lst:
+            if isinstance(item, str):
+                add_url(item, cat)
+            elif isinstance(item, dict):
+                for k in ("url", "src", "image", "image_url", "original", "large"):
+                    if isinstance(item.get(k), str) and item.get(k).strip():
+                        add_url(item.get(k), cat)
+                        break
+
+    if isinstance(prop_data, dict):
+        extract_from_list(prop_data.get("architecture"), "Architecture")
+        extract_from_list(prop_data.get("interior"), "Interior")
+        extract_from_list(prop_data.get("facilities"), "Facilities")
+        extract_from_list(prop_data.get("architectures"), "Architecture")
+        extract_from_list(prop_data.get("interiors"), "Interior")
+        extract_from_list(prop_data.get("facility"), "Facilities")
+
+    return found
+
+
+def group_images_by_category(images: List[Dict[str, str]]) -> Dict[str, List[str]]:
+    grouped = defaultdict(list)
+    for it in images:
+        url = it.get("url")
+        cat = (it.get("category") or "").strip()
+        if cat in {"Architecture", "Interior", "Facilities"} and url:
+            grouped[cat].append(url)
+
+    ordered: Dict[str, List[str]] = {}
+    for cat in ["Architecture", "Interior", "Facilities"]:
+        if grouped.get(cat):
+            ordered[cat] = grouped[cat]
+    return ordered
+
+
+def flatten_grouped_with_limit(grouped: Dict[str, List[str]], limit: int) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    remaining = limit
+    for cat in ["Architecture", "Interior", "Facilities"]:
+        if remaining <= 0:
+            break
+        urls = grouped.get(cat, [])
+        take = urls[:remaining]
+        if take:
+            out[cat] = take
+            remaining -= len(take)
+    return out
+
+
+def _pick_overview(data: Dict[str, Any]) -> Optional[str]:
+    for path in [
+        ("project_overview",),
+        ("overview",),
+        ("description",),
+        ("about",),
+        ("data", "project_overview"),
+        ("data", "overview"),
+        ("data", "description"),
+    ]:
+        cur = data
+        ok = True
+        for k in path:
+            if not isinstance(cur, dict) or k not in cur:
+                ok = False
+                break
+            cur = cur[k]
+        if ok and isinstance(cur, str) and cur.strip():
+            return cur.strip()
+    return None
+
+
+def _extract_cover_image(prop_data: Dict[str, Any], images_with_cat: List[Dict[str, str]]) -> Optional[str]:
+    for k in ("cover_image_url", "coverImageUrl", "cover", "main_image", "main_image_url", "image", "image_url"):
+        v = prop_data.get(k)
+        if isinstance(v, str) and v.strip() and (v.startswith("http") or v.startswith("//")):
+            return v.strip()
+    if images_with_cat:
+        return images_with_cat[0].get("url")
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_full_property_details(prop_id: int, timeout: int = 15) -> Dict[str, Any]:
+    url = f"{MARRFA_PROPERTY_API_BASE}/properties/{prop_id}"
+    try:
+        resp = requests.get(url, timeout=timeout, headers={"accept": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+
+        prop_data = data.get("data", data) if isinstance(data, dict) else {}
+        prop_data = prop_data if isinstance(prop_data, dict) else {}
+
+        images_with_cat = _pick_images_with_categories(data if isinstance(data, dict) else {})
+        cover = _extract_cover_image(prop_data, images_with_cat)
+        overview = _pick_overview(data if isinstance(data, dict) else {})
+
+        return {
+            "ok": True,
+            "id": prop_id,
+            "full_data": prop_data,
+            "cover": cover,
+            "images": images_with_cat,
+            "overview": overview or "",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# -------------------------
+# SSE stream helpers
+# -------------------------
 def sse_lines(resp: requests.Response) -> Generator[str, None, None]:
     for raw in resp.iter_lines(decode_unicode=True):
         if raw is None:
@@ -406,7 +539,6 @@ def read_sse_events(resp: requests.Response) -> Generator[Dict[str, Any], None, 
             chunk = line.split(":", 1)[1].strip()
             data_buf += chunk
 
-    # Handle any remaining data
     if data_buf:
         try:
             payload = json.loads(data_buf)
@@ -415,121 +547,11 @@ def read_sse_events(resp: requests.Response) -> Generator[Dict[str, Any], None, 
         yield {"event": event_name, "data": payload}
 
 
-def render_image_carousel(images: List[str], carousel_id: str) -> str:
-    """Render HTML for image carousel with navigation"""
-    if not images:
-        return '<div class="empty-img">No images available</div>'
-
-    images = images[:5]  # Limit to 5 images
-
-    carousel_html = f'''
-    <div class="image-carousel" id="carousel-{carousel_id}">
-        <div class="image-counter">{len(images)} image{"" if len(images) == 1 else "s"}</div>
-    '''
-
-    # Add images
-    for i, img_url in enumerate(images):
-        display_style = "block" if i == 0 else "none"
-        carousel_html += f'<img class="carousel-image" src="{escape_html(img_url)}" style="display: {display_style};" data-index="{i}">'
-
-    # Add navigation buttons if multiple images
-    if len(images) > 1:
-        carousel_html += '''
-        <button class="carousel-nav carousel-prev" onclick="prevImage('carousel-''' + carousel_id + '''')">‹</button>
-        <button class="carousel-nav carousel-next" onclick="nextImage('carousel-''' + carousel_id + '''')">›</button>
-        <div class="carousel-dots">
-        '''
-
-        for i in range(len(images)):
-            active_class = "active" if i == 0 else ""
-            carousel_html += f'<div class="carousel-dot {active_class}" onclick="goToImage(\'carousel-{carousel_id}\', {i})"></div>'
-
-        carousel_html += '</div>'
-
-    carousel_html += '</div>'
-
-    return carousel_html
-
-
-def get_property_description(p: Dict[str, Any], raw: Dict[str, Any]) -> str:
-    """Extract or generate property description"""
-    # Try to get description from various fields
-    description = p.get("description") or raw.get("description") or raw.get("short_description") or ""
-
-    if not description:
-        # Generate a generic description based on available data
-        title = p.get("title", "This property")
-        location = p.get("location", "Dubai")
-        developer = p.get("developer", "a reputable developer")
-        completion = fmt_completion(raw, p)
-
-        # Check for amenities
-        amenities = []
-        amenity_fields = {
-            "has_pool": "swimming pool",
-            "has_gym": "fitness center",
-            "has_parking": "parking facilities",
-            "has_security": "24/7 security",
-            "has_garden": "landscaped gardens",
-            "has_play_area": "children's play area",
-            "has_concierge": "concierge service"
-        }
-
-        for field, amenity_name in amenity_fields.items():
-            if raw.get(field):
-                amenities.append(amenity_name)
-
-        amenity_text = ""
-        if amenities:
-            if len(amenities) == 1:
-                amenity_text = f" featuring a {amenities[0]}."
-            elif len(amenities) == 2:
-                amenity_text = f" featuring {amenities[0]} and {amenities[1]}."
-            else:
-                amenity_text = f" featuring {', '.join(amenities[:-1])}, and {amenities[-1]}."
-
-        # Get property type
-        prop_type = raw.get("unit_types") or raw.get("property_type") or ""
-        if isinstance(prop_type, list):
-            prop_type = prop_type[0] if prop_type else ""
-
-        # Generate description
-        if prop_type:
-            description = f"{title} is a {prop_type.lower()} located in {location}, developed by {developer}. With completion scheduled for {completion}, it offers modern living spaces with contemporary designs and high-quality finishes.{amenity_text} This property represents an excellent investment opportunity in one of Dubai's most sought-after neighborhoods."
-        else:
-            description = f"{title} is a premium residential development located in {location}, developed by {developer}. With completion scheduled for {completion}, it offers modern living spaces with contemporary designs and high-quality finishes.{amenity_text} This property represents an excellent investment opportunity in one of Dubai's most sought-after neighborhoods."
-
-    # Truncate if too long
-    if len(description) > 200:
-        description = description[:197] + "..."
-
-    return description
-
-
 def stream_chat(query: str) -> Dict[str, Any]:
+    if not check_api_health():
+        return {"reply": "⚠️ Cannot connect to backend API.", "properties": [], "properties_full": [], "total": 0}
+
     payload = {"query": query, "session_id": st.session_state.session_id, "is_logged_in": False}
-
-    # Create placeholders
-    assistant_placeholder = st.empty()
-    loading_placeholder = st.empty()
-
-    # Clear previous loading if exists
-    loading_placeholder.empty()
-
-    # Show initial loading indicator immediately
-    loading_placeholder.markdown(
-        """
-<div class="msg-wrap">
-  <div class="loading-bubble">
-    <div class="dot"></div>
-    <div class="dot"></div>
-    <div class="dot"></div>
-    <span style="margin-left: 10px;">Processing your request...</span>
-  </div>
-</div>
-        """,
-        unsafe_allow_html=True
-    )
 
     typing_text = ""
     final_payload: Dict[str, Any] = {}
@@ -537,115 +559,16 @@ def stream_chat(query: str) -> Dict[str, Any]:
     try:
         with requests.post(STREAM_URL, json=payload, stream=True, timeout=120) as resp:
             resp.raise_for_status()
-
             for ev in read_sse_events(resp):
                 data = ev["data"]
-
-                if data.get("type") == "loading":
-                    # Update loading message
-                    loading_placeholder.markdown(
-                        f"""
-<div class="msg-wrap">
-  <div class="loading-bubble">
-    <div class="dot"></div>
-    <div class="dot"></div>
-    <div class="dot"></div>
-    <span style="margin-left: 10px;">{escape_html(data.get("message", "Processing..."))}</span>
-  </div>
-</div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                elif data.get("type") == "delta":
-                    # Hide loading indicator when we start getting content
-                    loading_placeholder.empty()
-
+                if data.get("type") == "delta":
                     typing_text += data.get("delta", "")
-                    html = escape_html(typing_text).replace("\n", "<br>")
-                    assistant_placeholder.markdown(
-                        f"""
-<div class="msg-wrap">
-  <div class="msg-bubble">{html}</div>
-</div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                elif data.get("type") == "content_start":
-                    # Hide loading when content starts
-                    loading_placeholder.empty()
-
                 elif data.get("type") == "final":
-                    # Hide any remaining loading indicator
-                    loading_placeholder.empty()
-
                     final_payload = data
-                    typing_text = final_payload.get("reply", typing_text)
-                    html = escape_html(typing_text).replace("\n", "<br>")
-
-                    # Update the final message
-                    assistant_placeholder.markdown(
-                        f"""
-<div class="msg-wrap">
-  <div class="msg-bubble">{html}</div>
-</div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                elif data.get("type") == "error":
-                    loading_placeholder.empty()
-                    error_msg = data.get("message", "An error occurred")
-                    assistant_placeholder.markdown(
-                        f"""
-<div class="msg-wrap">
-  <div class="msg-bubble" style="color: #d32f2f;">{escape_html(error_msg)}</div>
-</div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                    final_payload = {"reply": error_msg, "properties": [], "properties_full": [], "total": 0}
-
                 elif data.get("type") == "done":
                     break
-
-    except requests.exceptions.ConnectionError as e:
-        loading_placeholder.empty()
-        err = "❌ Connection error: Cannot connect to the server. Please make sure the backend is running."
-        assistant_placeholder.markdown(
-            f"""
-<div class="msg-wrap">
-  <div class="msg-bubble" style="color: #d32f2f;">{escape_html(err)}</div>
-</div>
-            """,
-            unsafe_allow_html=True
-        )
-        return {"reply": err, "properties": [], "properties_full": [], "total": 0}
-    except requests.exceptions.RequestException as e:
-        loading_placeholder.empty()
-        err = f"❌ Network error: {str(e)}"
-        assistant_placeholder.markdown(
-            f"""
-<div class="msg-wrap">
-  <div class="msg-bubble" style="color: #d32f2f;">{escape_html(err)}</div>
-</div>
-            """,
-            unsafe_allow_html=True
-        )
-        return {"reply": err, "properties": [], "properties_full": [], "total": 0}
     except Exception as e:
-        loading_placeholder.empty()
-        err = f"❌ Unexpected error: {str(e)}"
-        assistant_placeholder.markdown(
-            f"""
-<div class="msg-wrap">
-  <div class="msg-bubble" style="color: #d32f2f;">{escape_html(err)}</div>
-</div>
-            """,
-            unsafe_allow_html=True
-        )
-        return {"reply": err, "properties": [], "properties_full": [], "total": 0}
+        return {"reply": f"❌ Error: {e}", "properties": [], "properties_full": [], "total": 0}
 
     if not final_payload:
         final_payload = {"reply": typing_text, "properties": [], "properties_full": [], "total": 0}
@@ -654,216 +577,217 @@ def stream_chat(query: str) -> Dict[str, Any]:
 
 
 # -------------------------
-# Carousel JavaScript
+# UI render helpers
 # -------------------------
-carousel_js = """
-<script>
-function showImage(carouselId, index) {
-    const carousel = document.getElementById(carouselId);
-    if (!carousel) return;
-
-    const images = carousel.querySelectorAll('.carousel-image');
-    const dots = carousel.querySelectorAll('.carousel-dot');
-
-    images.forEach(img => img.style.display = 'none');
-    dots.forEach(dot => dot.classList.remove('active'));
-
-    if (images[index]) {
-        images[index].style.display = 'block';
-    }
-    if (dots[index]) {
-        dots[index].classList.add('active');
-    }
-}
-
-function nextImage(carouselId) {
-    const carousel = document.getElementById(carouselId);
-    if (!carousel) return;
-
-    const images = carousel.querySelectorAll('.carousel-image');
-    const currentIndex = Array.from(images).findIndex(img => img.style.display === 'block');
-    const nextIndex = (currentIndex + 1) % images.length;
-    showImage(carouselId, nextIndex);
-}
-
-function prevImage(carouselId) {
-    const carousel = document.getElementById(carouselId);
-    if (!carousel) return;
-
-    const images = carousel.querySelectorAll('.carousel-image');
-    const currentIndex = Array.from(images).findIndex(img => img.style.display === 'block');
-    const prevIndex = (currentIndex - 1 + images.length) % images.length;
-    showImage(carouselId, prevIndex);
-}
-
-function goToImage(carouselId, index) {
-    showImage(carouselId, index);
-}
-
-// Auto-rotate carousels
-document.addEventListener('DOMContentLoaded', function() {
-    const carousels = document.querySelectorAll('.image-carousel');
-
-    carousels.forEach(carousel => {
-        const images = carousel.querySelectorAll('.carousel-image');
-        if (images.length > 1) {
-            let currentIndex = 0;
-
-            // Auto-rotate every 5 seconds
-            const intervalId = setInterval(() => {
-                currentIndex = (currentIndex + 1) % images.length;
-                showImage(carousel.id, currentIndex);
-            }, 5000);
-
-            // Stop auto-rotation on hover
-            carousel.addEventListener('mouseenter', () => {
-                clearInterval(intervalId);
-            });
-
-            // Resume auto-rotation when mouse leaves
-            carousel.addEventListener('mouseleave', () => {
-                clearInterval(intervalId);
-                setInterval(() => {
-                    currentIndex = (currentIndex + 1) % images.length;
-                    showImage(carousel.id, currentIndex);
-                }, 5000);
-            });
-        }
-    });
-});
-</script>
-"""
-
-# -------------------------
-# Render conversation
-# -------------------------
-if not st.session_state.history:
+def render_user(text: str):
     st.markdown(
-        """
+        f"""
 <div class="msg-wrap">
-  <div class="msg-bubble">👋 Welcome to Marrfa AI! Ask about properties, Marrfa company info, or search for specific developments in Dubai.</div>
+  <div class="msg-bubble user-bubble">{escape_html(text)}</div>
 </div>
         """,
         unsafe_allow_html=True
     )
+
+
+def render_assistant(text_html: str):
+    st.markdown(
+        f"""
+<div class="msg-wrap">
+  <div class="msg-bubble">{text_html}</div>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_cover_image(url: str):
+    st.markdown(
+        f"""
+<div class="marrfa-main-card">
+  <a href="{escape_html(url)}" target="_blank" rel="noopener noreferrer">
+    <img src="{escape_html(url)}" />
+  </a>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_category_grid(urls: List[str], cols_per_row: int = 3):
+    if not urls:
+        return
+    rows = (len(urls) + cols_per_row - 1) // cols_per_row
+    idx = 0
+    for _ in range(rows):
+        cols = st.columns(cols_per_row, gap="medium")
+        for c in cols:
+            if idx >= len(urls):
+                break
+            url = urls[idx]
+            with c:
+                st.markdown(
+                    f"""
+<div class="marrfa-thumb">
+  <a href="{escape_html(url)}" target="_blank" rel="noopener noreferrer">
+    <img src="{escape_html(url)}" />
+  </a>
+</div>
+                    """,
+                    unsafe_allow_html=True
+                )
+            idx += 1
+
+
+# -------------------------
+# Main render (conversation)
+# -------------------------
+if not st.session_state.history:
+    render_assistant("👋 Welcome to Marrfa AI! Ask about properties or Marrfa company info.")
 else:
     for item in st.session_state.history:
         q = item.get("q", "")
         if q:
-            q_html = escape_html(q)
-            st.markdown(
-                f"""
-<div class="msg-wrap">
-  <div class="msg-bubble user-bubble">{q_html}</div>
-</div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        reply = item.get("reply", "")
-        reply_html = escape_html(reply).replace("\n", "<br>")
-        st.markdown(
-            f"""
-<div class="msg-wrap">
-  <div class="msg-bubble">{reply_html}</div>
-</div>
-            """,
-            unsafe_allow_html=True
-        )
+            render_user(q)
 
         data = item.get("data", {}) or {}
-        props = safe_list(data.get("properties"))
-        props_full = safe_list(data.get("properties_full"))
+        props = safe_list(data.get("properties")) or []
+        props_full = safe_list(data.get("properties_full")) or []
 
-        if props:
-            total_count = data.get("total", len(props))
+        filters_used = data.get("filters_used", {}) or {}
+        is_specific = (filters_used.get("search_type") == "specific")
+
+        # try to get id for specific property
+        prop_id = None
+        title_fallback = ""
+        if is_specific:
+            cand = None
+            if props_full and isinstance(props_full[0], dict):
+                cand = props_full[0]
+            elif props and isinstance(props[0], dict):
+                cand = props[0]
+            if cand:
+                title_fallback = cand.get("title") or cand.get("name") or ""
+                try:
+                    prop_id = int(cand.get("id"))
+                except Exception:
+                    prop_id = None
+
+        # ✅ CHANGE 1: Do NOT show backend long paragraph for specific property (it repeats)
+        if not is_specific:
+            reply = item.get("reply", "") or ""
+            render_assistant(escape_html(reply).replace("\n", "<br>"))
+
+        # ✅ SPECIFIC PROPERTY VIEW (cover -> overview -> category images)
+        if is_specific and prop_id:
+            details = fetch_full_property_details(prop_id)
+            if not details.get("ok"):
+                render_assistant(f"⚠️ Could not load property details: {escape_html(details.get('error', 'Unknown error'))}")
+                continue
+
+            full_data = details.get("full_data") or {}
+            cover = details.get("cover")
+            overview = (details.get("overview") or "").strip()
+            images = details.get("images") or []
+
+            title = full_data.get("name") or full_data.get("title") or title_fallback or "Untitled Property"
+            location = full_data.get("area") or full_data.get("location") or "Unknown Location"
+            developer = full_data.get("developer") or "Unknown Developer"
+
+            area_text = fmt_area(full_data)
+            price_text = fmt_price(full_data)
+            completion = (str(full_data.get("completion_year") or "")).strip()
+
+            # assistant bubble: only ONE clean intro (no repetition)
+            lines = [
+                f"Here are the details for <b>{escape_html(title)}</b>:",
+                f"• <b>Location</b>: {escape_html(str(location))}",
+                f"• <b>Developer</b>: {escape_html(str(developer))}",
+                f"• <b>Area</b>: {escape_html(str(area_text))}",
+                f"• <b>Price</b>: {escape_html(str(price_text))}",
+            ]
+            if completion:
+                lines.append(f"• <b>Completion</b>: {escape_html(completion)}")
+
+            render_assistant("<br>".join(lines))
+
+            # 1) Cover image first
+            if isinstance(cover, str) and cover.strip():
+                render_cover_image(cover)
+
+            # 2) Description (overview) once
+            if overview:
+                st.markdown("### Overview")
+                st.write(overview)
+
+            # 3) Images category wise (Architecture -> Interior -> Facilities)
+            st.markdown("### Images")
+            grouped = group_images_by_category(images)
+            limited_grouped = flatten_grouped_with_limit(grouped, MAX_IMAGES_TO_SHOW)
+
+            for cat in ["Architecture", "Interior", "Facilities"]:
+                urls = limited_grouped.get(cat, [])
+                # remove cover image if repeated
+                if cover:
+                    urls = [u for u in urls if u != cover]
+                if not urls:
+                    continue
+
+                st.markdown(f'<div class="cat-title">{cat}</div>', unsafe_allow_html=True)
+                render_category_grid(urls, cols_per_row=COLS_PER_ROW)
+
+            # "For more click here"
+            property_site_url = f"{MARRFA_SITE_BASE}/propertylisting/{prop_id}"
             st.markdown(
-                f'<div class="small-muted" style="margin: 6px 0 14px 0;">Showing {len(props)} of {total_count} result{"" if total_count == 1 else "s"}</div>',
+                f'For more <a href="{escape_html(property_site_url)}" target="_blank" rel="noopener noreferrer"><b>click here</b></a>',
                 unsafe_allow_html=True
             )
 
-            # Use 3-column layout for property cards
+        # Non-specific property listing cards (optional)
+        elif props:
+            st.markdown(
+                f'<div class="small-muted">Showing {len(props)} result{"s" if len(props) != 1 else ""}</div>',
+                unsafe_allow_html=True
+            )
             cols = st.columns(3, gap="large")
-
-            for i, p in enumerate(props):
+            for i, p in enumerate(props[:15]):
                 col = cols[i % 3]
-                raw = props_full[i] if i < len(props_full) else {}
-
-                # Extract property data
-                title = p.get("title") or raw.get("name") or "Untitled Property"
-                location = p.get("location") or raw.get("area") or "Dubai"
-                developer = p.get("developer") or raw.get("developer") or "Not specified"
-                completion = fmt_completion(raw, p)
-                price_text = fmt_price(raw)
-                cover = p.get("cover_image") or raw.get("cover_image_url")
-
-                # Get additional images (if available)
-                additional_images = p.get("property_images") or []
-                if cover and cover not in additional_images:
-                    all_images = [cover] + additional_images
-                else:
-                    all_images = additional_images if additional_images else []
-
-                # Get property description
-                description = get_property_description(p, raw)
-
                 with col:
-                    # Render image carousel or single image
-                    carousel_id = f"{item.get('id', 'x')}_{i}"
+                    title = p.get("title") or "Untitled Property"
+                    location = p.get("location") or "Dubai"
+                    developer = p.get("developer") or "Unknown"
+                    cover = p.get("cover_image") or ""
+                    listing_url = p.get("listing_url") or "#"
 
-                    if len(all_images) > 1:
-                        # Multiple images - use carousel
-                        img_html = render_image_carousel(all_images[:5], carousel_id)
-                    elif cover:
-                        # Single image
-                        img_html = f'<img class="carousel-image" src="{escape_html(cover)}" style="width: 100%; height: 200px; object-fit: cover; display: block;">'
+                    img_html = ""
+                    if cover:
+                        img_html = f'<img src="{escape_html(cover)}" style="width:100%;height:200px;object-fit:cover;display:block;">'
                     else:
-                        # No images
-                        img_html = '<div class="empty-img">No images available</div>'
+                        img_html = '<div style="width:100%;height:200px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;color:#6b7280;">No image</div>'
 
-                    # Render property card
                     st.markdown(
                         f"""
 <div class="prop-card">
   {img_html}
   <div class="prop-body">
     <div class="prop-title">{escape_html(title)}</div>
-    <div class="prop-description" title="{escape_html(description)}">{escape_html(description)}</div>
     <div class="meta-box">
-      <div class="meta-line">
-        <span class="meta-icon">📍</span>
-        <span>{escape_html(location)}</span>
-      </div>
-      <div class="meta-line">
-        <span class="meta-icon">🏗️</span>
-        <span>{escape_html(developer)}</span>
-      </div>
-      <div class="meta-line">
-        <span class="meta-icon">🗓️</span>
-        <span>Completion: {escape_html(str(completion))}</span>
-      </div>
-      <div class="meta-line">
-        <span class="meta-icon">💰</span>
-        <span>{escape_html(str(price_text))}</span>
-      </div>
+      <div class="meta-line"><span class="meta-icon">📍</span><span>{escape_html(str(location))}</span></div>
+      <div class="meta-line"><span class="meta-icon">🏗️</span><span>{escape_html(str(developer))}</span></div>
     </div>
-    <button class="view-details-btn" onclick="(function(){{window.open('{p.get("listing_url", "#")}', '_blank');}})()">
-      View Details
-    </button>
+    <div style="margin-top:10px;">
+      <a href="{escape_html(listing_url)}" target="_blank" style="text-decoration:none;">
+        <button style="width:100%;border:none;border-radius:12px;padding:10px 16px;font-weight:700;background:#111827;color:#fff;cursor:pointer;">
+          View Details
+        </button>
+      </a>
+    </div>
   </div>
 </div>
                         """,
                         unsafe_allow_html=True
                     )
 
-# Inject carousel JavaScript
-st.markdown(carousel_js, unsafe_allow_html=True)
-
-# Details panel for selected property
-if st.session_state.selected_raw:
-    st.markdown("---")
-    st.subheader(f"Property Details: {st.session_state.selected_title}")
-    st.json(st.session_state.selected_raw)
 
 # -------------------------
 # Sticky input bottom
@@ -872,14 +796,12 @@ st.markdown('<div class="sticky-wrap"><div class="sticky-inner"><div class="stic
 
 with st.form("sticky_form", clear_on_submit=True):
     c1, c2 = st.columns([12, 1], gap="small")
-
     with c1:
         prompt = st.text_input(
             "Message",
-            placeholder="Ask about properties, Marrfa company info, or search for specific developments...",
+            placeholder="Ask about properties, Marrfa company info, or tell me about a property by name...",
             label_visibility="collapsed",
         )
-
     with c2:
         st.markdown('<div class="send-btn">', unsafe_allow_html=True)
         submitted = st.form_submit_button("▶")
@@ -896,8 +818,9 @@ with st.form("sticky_form", clear_on_submit=True):
 
 st.markdown("</div></div></div>", unsafe_allow_html=True)
 
+
 # -------------------------
-# After rerun: if last message reply empty -> stream now
+# After rerun: if last message reply empty -> call backend now
 # -------------------------
 if st.session_state.history and st.session_state.history[-1].get("reply", "") == "":
     last = st.session_state.history[-1]
