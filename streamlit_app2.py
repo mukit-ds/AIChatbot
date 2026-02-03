@@ -267,6 +267,28 @@ def safe_list(x):
 def escape_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
+def format_assistant_reply_html(reply: str) -> str:
+    """Convert plain text into HTML-safe paragraphs for assistant bubbles.
+
+    - Escapes HTML
+    - Preserves line breaks using <br>
+    - Converts blank lines into paragraph breaks (<br><br>)
+    """
+    if not reply:
+        return ""
+
+    # Escape any HTML first
+    t = escape_html(str(reply))
+
+    # Normalize newlines (Windows/Mac/Linux)
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Split by blank lines to keep paragraph structure
+    parts = [p.strip() for p in t.split("\n\n") if p.strip()]
+    html_parts = [p.replace("\n", "<br>") for p in parts]
+
+    return "<br><br>".join(html_parts)
+
 
 def check_api_health() -> bool:
     try:
@@ -281,7 +303,8 @@ def check_api_health() -> bool:
 
 
 def fmt_price(raw: Dict[str, Any]) -> str:
-    cur = raw.get("price_currency") or raw.get("currency") or "AED"
+    # Always display in Million AED (e.g., AED 2.75M – 4.10M)
+    cur = "AED"
 
     def _num(x):
         try:
@@ -297,12 +320,23 @@ def fmt_price(raw: Dict[str, Any]) -> str:
     mn = _num(raw.get("min_price_aed") or raw.get("min_price") or raw.get("price_from") or raw.get("starting_price"))
     mx = _num(raw.get("max_price_aed") or raw.get("max_price") or raw.get("price_to") or raw.get("ending_price"))
 
-    if mn is not None and mx is not None:
-        return f"{cur} {mn:,.0f} – {mx:,.0f}"
-    if mn is not None:
-        return f"{cur} {mn:,.0f}+"
-    if mx is not None:
-        return f"Up to {cur} {mx:,.0f}"
+    def _fmt_m(v: Optional[float]) -> Optional[str]:
+        if v is None:
+            return None
+        m = v / 1_000_000.0
+        # keep up to 2 decimals, trim trailing zeros
+        s = f"{m:.2f}".rstrip("0").rstrip(".")
+        return f"{s}M"
+
+    mn_s = _fmt_m(mn)
+    mx_s = _fmt_m(mx)
+
+    if mn_s and mx_s:
+        return f"{cur} {mn_s} – {mx_s}"
+    if mn_s:
+        return f"{cur} {mn_s}+"
+    if mx_s:
+        return f"Up to {cur} {mx_s}"
     return "N/A"
 
 
@@ -334,6 +368,29 @@ def fmt_area(raw: Dict[str, Any]) -> str:
     if single is not None:
         return f"{single:,.0f} {unit}"
     return "N/A"
+
+
+def fmt_completion_year(raw: Dict[str, Any]) -> str:
+    """Best-effort completion year extraction across Marrfa payload variants."""
+    for k in ("completion_year", "completionYear", "year", "completion"):
+        v = raw.get(k)
+        if v is not None and str(v).strip():
+            s = str(v).strip()
+            m = re.search(r"\b(19\d{2}|20\d{2})\b", s)
+            return m.group(1) if m else s
+
+    # common datetime/date fields
+    for k in ("completion_datetime", "completion_date", "handover_date", "handover_datetime"):
+        v = raw.get(k)
+        if v is not None and str(v).strip():
+            s = str(v).strip()
+            m = re.search(r"\b(19\d{2}|20\d{2})\b", s)
+            if m:
+                return m.group(1)
+            if len(s) >= 4 and s[:4].isdigit():
+                return s[:4]
+
+    return ""
 
 
 # ----------------------------
@@ -693,7 +750,7 @@ else:
         # ✅ CHANGE 1: Do NOT show backend long paragraph for specific property (it repeats)
         if not is_specific:
             reply = item.get("reply", "") or ""
-            render_assistant(escape_html(reply).replace("\n", "<br>"))
+            render_assistant(format_assistant_reply_html(reply))
 
         # ✅ SPECIFIC PROPERTY VIEW (cover -> overview -> category images)
         if is_specific and prop_id:
@@ -713,7 +770,7 @@ else:
 
             area_text = fmt_area(full_data)
             price_text = fmt_price(full_data)
-            completion = (str(full_data.get("completion_year") or "")).strip()
+            completion = fmt_completion_year(full_data)
 
             # assistant bubble: only ONE clean intro (no repetition)
             lines = [
@@ -724,7 +781,7 @@ else:
                 f"• <b>Price</b>: {escape_html(str(price_text))}",
             ]
             if completion:
-                lines.append(f"• <b>Completion</b>: {escape_html(completion)}")
+                lines.append(f"• <b>Completion Year</b>: {escape_html(completion)}")
 
             render_assistant("<br>".join(lines))
 
@@ -773,6 +830,8 @@ else:
                     title = p.get("title") or "Untitled Property"
                     location = p.get("location") or "Dubai"
                     developer = p.get("developer") or "Unknown"
+                    price_text = fmt_price(p)
+                    completion = fmt_completion_year(p)
                     cover = p.get("cover_image") or ""
                     listing_url = p.get("listing_url") or "#"
 
@@ -796,6 +855,8 @@ else:
     <div class="meta-box">
       <div class="meta-line"><span class="meta-icon">📍</span><span>{escape_html(str(location))}</span></div>
       <div class="meta-line"><span class="meta-icon">🏗️</span><span>{escape_html(str(developer))}</span></div>
+      <div class="meta-line"><span class="meta-icon">💰</span><span>{escape_html(str(price_text))}</span></div>
+      {f'<div class="meta-line"><span class="meta-icon">🗓️</span><span>Completion: {escape_html(str(completion))}</span></div>' if completion else ''}
     </div>
   </div>
 </div>
