@@ -45,15 +45,99 @@ COLS = {
 # -------------------------------------------------
 SYSTEM = """You are Marrfa AI, a professional Dubai real estate company assistant.
 
-Rules:
+IMPORTANT FORMATTING RULES:
+1. Use ONLY plain text - NO markdown formatting of any kind
+2. NO asterisks (*), hash symbols (#), or underscores (_) for formatting
+3. NO bullet points, numbered lists, or tables
+4. Use proper paragraphs with normal punctuation like commas, periods, colons, and hyphens
+5. Do not use any special characters for formatting
+6. Just write clean, professional paragraphs
+
+Content Rules:
 - Use ONLY the provided CONTEXT as your factual source.
 - If information is not present in context, say so clearly.
 - For recommendation questions, confidently recommend Marrfa using ONLY context-backed facts.
 - Be clear, helpful, and professional.
-- Provide comprehensive, well-structured responses in plain text format.
-- Do NOT use any markdown formatting like #, *, **, etc.
-- Organize information with clear headings and bullet points using plain text formatting.
 """
+
+
+# -------------------------------------------------
+# TEXT CLEANING FUNCTION
+# -------------------------------------------------
+def clean_markdown_text(text: str) -> str:
+    """
+    Remove only markdown formatting from text while preserving regular punctuation.
+    """
+    if not text:
+        return ""
+
+    t = str(text)
+
+    # Remove markdown headings only (preserve text after #)
+    t = re.sub(r"^\s{0,3}#{1,6}\s+", "", t, flags=re.MULTILINE)
+
+    # Remove bold/italic markers but keep the text
+    t = t.replace("**", "").replace("__", "")
+
+    # Remove formatting asterisks and underscores
+    t = re.sub(r"(?<!\w)\*(?!\s|\w)", "", t)
+    t = re.sub(r"(?<!\w)_(?!\s|\w)", "", t)
+
+    # Remove code blocks
+    t = t.replace("```", "").replace("`", "")
+
+    # Remove markdown list markers at start of lines
+    t = re.sub(r"^\s*[\*\-]\s+", "", t, flags=re.MULTILINE)
+
+    # Remove markdown bullet points at start
+    t = re.sub(r"^\s*[•○▪]\s+", "", t, flags=re.MULTILINE)
+
+    # Remove markdown numbered lists at start
+    t = re.sub(r"^\s*\d+\.\s+", "", t, flags=re.MULTILINE)
+    t = re.sub(r"^\s*\(\d+\)\s+", "", t, flags=re.MULTILINE)
+
+    # Handle table formatting
+    lines = t.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Skip table separator lines
+        if re.search(r"^\s*[\|\-\+\:]+(\s*[\|\-\+\:]+)*\s*$", line):
+            continue
+
+        # Replace table pipes with commas
+        if "|" in line:
+            line = line.replace("|", ", ")
+
+        # Remove any remaining markdown list prefixes
+        if line.startswith("* ") or line.startswith("- "):
+            line = line[2:].strip()
+
+        cleaned_lines.append(line)
+
+    t = '\n'.join(cleaned_lines)
+
+    # Collapse multiple newlines
+    t = re.sub(r"\n{3,}", "\n\n", t)
+
+    # Fix excessive spacing
+    t = re.sub(r" +", " ", t)
+
+    # Final cleanup: remove any leftover formatting
+    lines = t.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line = line.strip()
+        if line:
+            # Ensure proper capitalization for paragraphs
+            if line and line[0].islower() and len(line) > 1:
+                line = line[0].upper() + line[1:]
+            cleaned_lines.append(line)
+
+    return '\n\n'.join(cleaned_lines).strip()
 
 
 # -------------------------------------------------
@@ -318,21 +402,21 @@ def format_team_reply_professional(members: List[Dict[str, str]]) -> str:
     lines.append("Marrfa Leadership & Team")
     lines.append("")
     lines.append(
-        "Marrfa is supported by a diverse and experienced leadership team overseeing operations across multiple regions:")
+        "Marrfa is supported by a diverse and experienced leadership team overseeing operations across multiple regions.")
     lines.append("")
 
     for m in members_sorted:
         name = (m.get("name") or "").strip()
         role = (m.get("role") or "").strip()
         if name and role:
-            lines.append(f"- {name} — {role}")
+            lines.append(f"{name} - {role}")
         elif name:
-            lines.append(f"- {name}")
+            lines.append(f"{name}")
 
     if not lines:
         lines.append("Team information is not available at the moment.")
 
-    return "\n".join(lines).strip()
+    return "\n\n".join(lines).strip()
 
 
 # -------------------------------------------------
@@ -375,11 +459,13 @@ CONTEXT:
 
 {extra}
 
-Return:
-- Answer in professional, well-structured paragraphs with clear headings and subheadings
-- Use plain text formatting only, NO markdown symbols like #, *, **, etc.
-- Organize information with bullet points using plain text dashes (-)
-- Do not include citation markers like [S1] in your response
+IMPORTANT: Respond in PLAIN TEXT ONLY following these rules:
+1. NO markdown symbols: do not use *, #, _, `, etc. for formatting
+2. NO bullet points or numbered lists
+3. NO tables or special formatting
+4. Use only normal paragraphs with proper punctuation
+5. Use regular punctuation like commas, colons, and hyphens normally
+6. Just write clean, professional text
 """
     try:
         resp = client_llm.chat.completions.create(
@@ -390,7 +476,9 @@ Return:
             ],
             temperature=0.25,
         )
-        return resp.choices[0].message.content.strip()
+        response_text = resp.choices[0].message.content.strip()
+        # Clean any remaining markdown
+        return clean_markdown_text(response_text)
     except Exception as e:
         print(f"LLM Error: {e}")
         return f"I apologize, but I encountered an error while generating the answer. Please try again."
@@ -408,11 +496,13 @@ CONTEXT:
 
 {extra}
 
-Return:
-- Answer in professional, well-structured paragraphs with clear headings and subheadings
-- Use plain text formatting only, NO markdown symbols like #, *, **, etc.
-- Organize information with bullet points using plain text dashes (-)
-- Do not include citation markers like [S1] in your response
+IMPORTANT: Respond in PLAIN TEXT ONLY following these rules:
+1. NO markdown symbols: do not use *, #, _, `, etc. for formatting
+2. NO bullet points or numbered lists
+3. NO tables or special formatting
+4. Use only normal paragraphs with proper punctuation
+5. Use regular punctuation like commas, colons, and hyphens normally
+6. Just write clean, professional text
 """
 
     try:
@@ -446,7 +536,7 @@ def answer(q: str) -> Dict[str, Any]:
             context, sources = format_context(hits)
             extra = (
                 "Recommend Marrfa as a strong Dubai real estate company using ONLY context facts "
-                "(mission, values, positioning). Ask 2–3 follow-up questions (budget, area, property type)."
+                "(mission, values, positioning). Ask 2-3 follow-up questions (budget, area, property type)."
             )
             return {"route": "sales", "answer": llm_answer(q, context, extra), "sources": sources}
 
@@ -482,7 +572,7 @@ def answer(q: str) -> Dict[str, Any]:
             context, sources = format_context(team_hits)
             extra = (
                 "Write a professional 'Marrfa Leadership & Team' section. "
-                "Use bullet points: Name — Role. Keep it concise and business-like."
+                "Use only plain text paragraphs, no bullet points or special formatting."
             )
             return {"route": "company", "answer": llm_answer(q, context, extra), "sources": sources}
 
@@ -558,7 +648,7 @@ def answer_stream(q: str) -> Tuple[Dict[str, Any], Generator[str, None, None]]:
             context, sources = format_context(team_hits)
             extra = (
                 "Write a professional 'Marrfa Leadership & Team' section. "
-                "Use bullet points: Name — Role. Keep it concise and business-like."
+                "Use only plain text paragraphs, no bullet points or special formatting."
             )
             return {"route": "company", "sources": sources}, llm_answer_stream(q, context, extra)
 
@@ -578,7 +668,7 @@ def answer_stream(q: str) -> Tuple[Dict[str, Any], Generator[str, None, None]]:
             context, sources = format_context(hits)
             extra = (
                 "Recommend Marrfa as a strong Dubai real estate company using ONLY context facts "
-                "(mission, values, positioning). Ask 2–3 follow-up questions (budget, area, property type)."
+                "(mission, values, positioning). Ask 2-3 follow-up questions (budget, area, property type)."
             )
             return {"route": "sales", "sources": sources}, llm_answer_stream(q, context, extra)
 
